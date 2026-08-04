@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="es" data-resolution="square">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1080px;
+        height: 1080px;
+        overflow: hidden;
+        background: #000;
+      }
+      body { font-family: "Inter", "Segoe UI", sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="8"
+      data-width="1080"
+      data-height="1080"
+    >
+      <div
+        id="title"
+        class="clip"
+        data-start="0"
+        data-duration="8"
+        data-track-index="1"
+        style="display:flex;align-items:center;justify-content:center;width:1080px;height:1080px;font-size:72px;line-height:1.15;color:#fff;font-weight:700;text-align:center;padding:56px;background:linear-gradient(160deg,#07111f 0%,#163a63 55%,#0b1a30 100%);"
+      >
+        crea un grafico estilo wall street
+      </div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.from("#title", { opacity: 0, y: 48, duration: 1.2, ease: "power3.out" }, 0);
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

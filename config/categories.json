@@ -1,0 +1,27 @@
+{
+  "defaultSlugs": ["fv", "tweet2"],
+  "aliases": {
+    "fv": "fb",
+    "tech": "tecnologia",
+    "ai": "ia",
+    "espectaculos": "espectaculo",
+    "deportes": "deportes"
+  },
+  "resolved": {
+    "fv": { "id": 37, "slug": "fb", "name": "FV" },
+    "tweet2": { "id": 101, "slug": "tweet2", "name": "tweet2" },
+    "ia": { "id": 73, "slug": "ia", "name": "IA" },
+    "tecnologia": { "id": 32, "slug": "tecnologia", "name": "Tecnología" },
+    "tech": { "id": 32, "slug": "tecnologia", "name": "Tecnología" },
+    "salud": { "id": 38, "slug": "salud", "name": "Salud" },
+    "politica": { "id": 31, "slug": "politica", "name": "Politica" },
+    "espectaculo": { "id": 40, "slug": "espectaculo", "name": "Espectáculo" },
+    "espectaculos": { "id": 40, "slug": "espectaculo", "name": "Espectáculo" },
+    "deportes": { "id": 35, "slug": "deportes", "name": "Deportes" },
+    "f1": { "id": 96, "slug": "f1", "name": "F1" },
+    "internacionales": { "id": 34, "slug": "internacionales", "name": "Internacionales" },
+    "nacionales": { "id": 30, "slug": "nacionales", "name": "Nacionales" },
+    "cultura": { "id": 16749, "slug": "cultura", "name": "Cultura" },
+    "autos": { "id": 16794, "slug": "autos", "name": "Autos" }
+  }
+}

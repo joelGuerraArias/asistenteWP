@@ -1,0 +1,14 @@
+# Fix para hosting que no reenvía Authorization a PHP (FVDigital, algunos nginx/apache)
+# Añade esto al INICIO de tu .htaccess de WordPress (antes de las reglas de WP)
+
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteCond %{HTTP:Authorization} ^(.*)
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+</IfModule>
+
+# Alternativa si lo anterior no funciona:
+# SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+
+# Para nginx (debe configurarlo el hosting):
+# fastcgi_param HTTP_AUTHORIZATION $http_authorization;

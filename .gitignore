@@ -1,0 +1,13 @@
+.env
+mcp-wordpress.config.json
+node_modules/
+video/**/node_modules/
+video/**/out/
+video/**/.hyperframes/
+video/**/renders/
+*.log
+.bot.pid
+.last-chat.json
+logs/
+assets/fonts/cache/
+assets/fonts/fonts.conf
