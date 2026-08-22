@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Input, Markup, Telegraf } from "telegraf";
 import { pathToFileURL } from "node:url";
@@ -13,7 +13,7 @@ import {
   synthesizeSpeech,
   transcribeAudio,
 } from "./audio.mjs";
-import { askDeepseek, buildNewsPostFromOcr, composeCardHeadline, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
+import { askDeepseek, buildNewsPostFromOcr, buildNoteFromDocument, composeCardHeadline, correctHeadlineSpelling, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
 import { generateNewsCard, fetchImageBuffer } from "./social-card.mjs";
 import { publishToWebhook } from "./publish-webhook.mjs";
 import { isPublicR2Url, uploadToR2 } from "./r2.mjs";
@@ -36,7 +36,7 @@ import { cleanImportedText, finalizeNewsHtml, textToNewsHtml } from "./news-form
 import { fetchGoogleAlertsForSheet } from "./gmail-alerts.mjs";
 import { replaceAlertsSheet } from "./sheets-alerts.mjs";
 import { cropImageByPercent, mimeFromBuffer } from "./image.mjs";
-import { detectCropBox, describeImage, ocrImage } from "./vision.mjs";
+import { detectCropBox, describeImage, ocrDocument, ocrImage } from "./vision.mjs";
 import {
   createPost,
   deletePost,
@@ -81,6 +81,7 @@ import {
 } from "./featured-image.mjs";
 import {
   buildSocialVideoR2Key,
+  detectVideoPlatform,
   downloadSocialVideo,
   isSupportedSocialVideoUrl,
   socialVideoPlatformLabel,
@@ -90,6 +91,21 @@ import {
   finalizeTradJob,
   prepareTradJob,
 } from "./trad-video.mjs";
+import {
+  cancelTermometroFlow,
+  emptyTermometroFlow,
+  getTermometroData,
+  handleTermometroText,
+  isTermometroActive,
+  setTermometroPhoto,
+  termometroAwaitingPhoto,
+  termometroCancelText,
+  termometroIntroText,
+} from "./termometro-flow.mjs";
+import {
+  cleanupTermometroWorkDir,
+  generateTermometroVideo,
+} from "./termometro-video.mjs";
 
 const sessions = new Map();
 
@@ -118,7 +134,9 @@ function getSession(chatId) {
       jarvisRecentOpeners: [],
       lastVideo: null,
       pendingSocialVideo: null,
+      pendingLinkChoice: null,
       pendingTradJob: null,
+      termometroFlow: null,
     });
   }
   return sessions.get(chatId);
@@ -142,21 +160,25 @@ function helpText() {
     "JARVIS — FV Digital",
     "",
     "Publicación directa:",
-    "• Enlace de noticia o red social (Instagram, Facebook, X) → titular, foto y texto a WP",
+    "• Enlace de noticia → titular, foto y texto a WP",
+    "• Enlace YT/IG/FB/X → eliges Video o Noticia (imagen)",
     "• /escribir — redactar noticia (elige entre 3 titulares)",
+    "• /periodista — tu titular (solo corrige ortografía) → tema → foto → WP + redes",
     "• /wp — artículo guiado: tema → borrador → foto → publicar",
     "• /noticia o /ocr — captura de pantalla (elige foto destacada antes de publicar)",
+    "• /nota — documento PDF o foto del documento → extrae info y pide/saca foto",
     "• /auto — foto + texto",
     "• /publicar — publicar el último borrador",
     "",
-    "/cancelar — cancelar redacción o modo /hyper en curso",
+    "/cancelar — cancelar redacción, /foto o modo /hyper en curso",
     "/ia — modo conversación (opcional)",
     "",
     "Video:",
-    "• /video URL — descargar (YT/IG/FB/X) → R2 → webhook (con confirmación)",
+    "• /video URL — descargar (YT/IG/FB/X) → R2 → webhook (con confirmación); también basta pegar el enlace y elegir Video",
     "• /trad URL — si no es ES: doblaje pabmatos; si ya es ES: solo overlay → 9:16 → webhook",
+    "• /foto — video Termómetro: nombre + institución + foto del funcionario",
     "• /hyper — diálogo guiado HyperFrames (generar o verificar)",
-    "• «genera un video con heygen» · /heygen /remotion · /videostatus",
+    "«genera un video con heygen» · /heygen /remotion · /videostatus",
     "",
     "Otros: /alertas /alertas-electricas /recortar /borrador /ver /editar /borrar /estado",
   ].join("\n");
@@ -190,16 +212,50 @@ async function guard(ctx, next) {
   return next();
 }
 
+const TELEGRAM_TEXT_MAX = 3900;
+
+function sanitizeTelegramText(text) {
+  let t = String(text ?? "");
+  if (/<!DOCTYPE html|<html[\s>]/i.test(t)) {
+    t = t.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (/522|timed out/i.test(t)) {
+      return "WordPress no respondió (Cloudflare 522: timeout). Reintenta en un minuto.";
+    }
+  }
+  return t;
+}
+
+function splitTelegramChunks(text, max = TELEGRAM_TEXT_MAX) {
+  const clean = sanitizeTelegramText(text);
+  if (clean.length <= max) return [clean];
+  const parts = [];
+  let remaining = clean;
+  while (remaining.length > 0) {
+    let chunk = remaining.slice(0, max);
+    if (remaining.length > max) {
+      const cut = chunk.lastIndexOf("\n");
+      if (cut > max * 0.4) chunk = remaining.slice(0, cut);
+    }
+    parts.push(chunk);
+    remaining = remaining.slice(chunk.length).trimStart();
+  }
+  return parts.length ? parts : [""];
+}
+
 async function reply(ctx, text, { voice = null } = {}) {
-  await ctx.reply(text);
+  const chunks = splitTelegramChunks(text);
+  for (const chunk of chunks) {
+    await ctx.reply(chunk);
+  }
   const session = getSession(ctx.chat.id);
   if (isEchoMode(session)) return;
   const useVoice = voice ?? session.voiceReplies;
-  if (!useVoice || !text) return;
+  if (!useVoice || !chunks[0]) return;
 
   let audioPath;
   try {
-    const short = text.length > 220 ? `${text.slice(0, 217)}...` : text;
+    const spoken = chunks[0];
+    const short = spoken.length > 220 ? `${spoken.slice(0, 217)}...` : spoken;
     audioPath = await synthesizeSpeech(short);
     const audioBuffer = await readTempFile(audioPath);
     await ctx.replyWithAudio(Input.fromBuffer(audioBuffer, "respuesta.mp3"), {
@@ -213,24 +269,7 @@ async function reply(ctx, text, { voice = null } = {}) {
 }
 
 async function replyLong(ctx, text, opts = {}) {
-  const max = 4000;
-  if (text.length <= max) {
-    await reply(ctx, text, opts);
-    return;
-  }
-
-  let remaining = text;
-  let first = true;
-  while (remaining.length > 0) {
-    let chunk = remaining.slice(0, max);
-    if (remaining.length > max) {
-      const cut = chunk.lastIndexOf("\n");
-      if (cut > max * 0.4) chunk = remaining.slice(0, cut);
-    }
-    await reply(ctx, chunk, { ...opts, voice: first ? opts.voice : false });
-    first = false;
-    remaining = remaining.slice(chunk.length).trimStart();
-  }
+  await reply(ctx, text, opts);
 }
 
 async function status(ctx, text) {
@@ -276,6 +315,7 @@ async function handleCasualChat(ctx, text) {
       "¿En qué puedo servirle?",
       "• Enlace de noticia o red social → la subo directo",
       "• /escribir [tema] → redacto con datos de la web",
+      "• /periodista → tu titular (sin cambiar su esencia) + tema + foto",
       "• /wp → artículo paso a paso para WordPress",
       "• /noticia → captura de pantalla",
       "• «genera un video heygen» → presentador con el resumen",
@@ -306,6 +346,10 @@ function wantsCrop(caption, photoIntent) {
 
 function wantsNewsOcr(caption, photoIntent) {
   return photoIntent === "noticia" || /noticia|ocr|captura/i.test(caption || "");
+}
+
+function wantsNota(caption, photoIntent) {
+  return photoIntent === "nota" || /\bnota\b/i.test(caption || "");
 }
 
 async function processCrop(ctx, buffer, mimeType, hint) {
@@ -373,11 +417,7 @@ async function uploadCardPublicUrl(card, title) {
   const filename = `fv-card-${Date.now()}.png`;
 
   if (config.r2?.enabled) {
-    try {
-      return await uploadToR2(card, `cards/${filename}`, "image/png");
-    } catch (error) {
-      console.warn("uploadToR2 falló, uso WordPress:", error.message);
-    }
+    return uploadToR2(card, `cards/${filename}`, "image/png");
   }
 
   const media = await uploadImageFromBuffer(card, filename, "image/png", {
@@ -440,6 +480,45 @@ async function handleVideoStatus(ctx) {
   await status(ctx, "🎬 Revisando herramientas de video...");
   const st = await getVideoToolsStatus();
   await reply(ctx, formatVideoToolsStatus(st), { voice: false });
+}
+
+function socialLinkChoiceKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🎬 Video", "link:video"),
+      Markup.button.callback("📰 Noticia", "link:news"),
+    ],
+    [Markup.button.callback("❌ Cancelar", "link:cancel")],
+  ]);
+}
+
+async function askSocialLinkChoice(ctx, url, extraCategorySlugs = []) {
+  const session = getSession(ctx.chat.id);
+  const platform =
+    detectVideoPlatform(url) || detectSocialPlatform(url) || "";
+  const label = socialVideoPlatformLabel(platform) || socialPlatformLabel(platform);
+  session.pendingLinkChoice = {
+    url,
+    extraCategories: extraCategorySlugs,
+  };
+  await ctx.reply(
+    [
+      `Enlace de ${label}.`,
+      "",
+      "¿Qué hago con él?",
+      "• Video — descargar y publicar en redes",
+      "• Noticia — titular, imagen y texto a WordPress",
+    ].join("\n"),
+    { ...socialLinkChoiceKeyboard(), disable_web_page_preview: true }
+  );
+}
+
+/** true si el bot preguntó Video/Noticia (no seguir el flujo de noticias). */
+async function maybeAskSocialLinkChoice(ctx, url, extraCategorySlugs = []) {
+  if (!url || !isSupportedSocialVideoUrl(url)) return false;
+  if (getSession(ctx.chat.id).writeFlow) cancelWriteFlow(getSession(ctx.chat.id));
+  await askSocialLinkChoice(ctx, url, extraCategorySlugs);
+  return true;
 }
 
 function socialVideoConfirmKeyboard() {
@@ -737,6 +816,98 @@ async function sendPendingSocialVideoToWebhook(ctx) {
   }
 }
 
+async function handleTermometroPhoto(ctx, imageBuffer, mimeType) {
+  const session = getSession(ctx.chat.id);
+  const flow = getTermometroData(session);
+  if (!flow) return;
+
+  setTermometroPhoto(session, imageBuffer, mimeType);
+
+  const name = flow.name;
+  const institution = flow.institution;
+
+  const job = await createVideoJob(ctx, {
+    tool: "Termómetro",
+    label: `Imagen Termómetro: ${name}`,
+    detail: `${institution}`,
+  });
+
+  let workDir;
+  try {
+    await withTyping(ctx, async () => {
+      let lastLine = "Quitando fondo y recortando figura…";
+
+      const { outputPath } = await generateTermometroVideo({
+        name,
+        institution,
+        photoBuffer: imageBuffer,
+        onProgress: (line) => {
+          lastLine = `⏳ ${line}`;
+          job.update(lastLine).catch(() => {});
+        },
+      });
+
+      workDir = outputPath ? outputPath.replace(/termometro\.png$/, "") : null;
+
+      if (!config.r2?.enabled) {
+        await ctx.replyWithPhoto(Input.fromLocalFile(outputPath), {
+          caption: `🌡️ Termómetro: ${name} en ${institution}`,
+        });
+        await job.finish({
+          ok: true,
+          message: "✅ Imagen Termómetro generada (R2 no configurado, enviado directo por Telegram).",
+        });
+        return;
+      }
+
+      job.update("⏳ Subiendo a R2…").catch(() => {});
+      const r2Key = `termometro/termometro-${Date.now()}.png`;
+      const imageBufferOut = readFileSync(outputPath);
+      const imageUrl = await uploadToR2(imageBufferOut, r2Key, "image/png");
+
+      const caption = ensureCaptionHashtag(`🌡️ Termómetro FV Digital: ${name} en ${institution}`);
+
+      session.lastVideo = {
+        title: `${name} en ${institution}`,
+        caption,
+        videoUrl: imageUrl,
+        r2Key,
+        mediaType: "IMAGE",
+      };
+
+      await job.finish({
+        ok: true,
+        message: "✅ Imagen Termómetro lista",
+        imageUrl,
+      });
+
+      session.pendingSocialVideo = {
+        kind: "termometro",
+        step: "confirm",
+        sourceUrl: "Termómetro FV Digital",
+        videoUrl: imageUrl,
+        r2Key,
+        caption,
+        title: `${name} en ${institution}`,
+        bytes: imageBufferOut.length,
+      };
+
+      await askSocialVideoConfirm(ctx, session.pendingSocialVideo);
+    });
+  } catch (error) {
+    console.error("handleTermometroPhoto:", error);
+    await job.finish({
+      ok: false,
+      message: `❌ Termómetro: ${error.message}`,
+    });
+  } finally {
+    cancelTermometroFlow(session);
+    if (workDir) {
+      cleanupTermometroWorkDir(workDir);
+    }
+  }
+}
+
 async function handleHeyGenCommand(ctx, text = "") {
   const session = getSession(ctx.chat.id);
   const prompt = text.trim() || session.lastVideo?.caption || session.lastVideo?.title;
@@ -1017,42 +1188,58 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
 
       await status(ctx, "4/4 📤 Subiendo a WordPress...");
       const postStatus = config.autoPublishUrls ? "publish" : config.defaultPostStatus;
-      const result = await createPost({
-        title: spanishTitle,
-        text: cleanBody.slice(0, 200),
-        htmlContent: html,
-        featuredMediaId,
-        extraCategorySlugs,
-        status: postStatus,
-      });
+      let wpError = null;
+      try {
+        const result = await createPost({
+          title: spanishTitle,
+          text: cleanBody.slice(0, 200),
+          htmlContent: html,
+          featuredMediaId,
+          extraCategorySlugs,
+          status: postStatus,
+        });
 
-      const verified = await getPost(result.post.id);
-      if (!verified?.id) {
-        throw new Error("WordPress no confirmó el post. Revisa permisos de hermes.");
+        const verified = await getPost(result.post.id);
+        if (!verified?.id) {
+          throw new Error("WordPress no confirmó el post. Revisa permisos de hermes.");
+        }
+
+        const session = getSession(ctx.chat.id);
+        session.lastPostId = verified.id;
+
+        await reply(
+          ctx,
+          formatTaxonomyNotice({
+            categories: result.categories,
+            tags: result.tags,
+          }),
+          { voice: false }
+        );
+        await replyLong(
+          ctx,
+          formatUploadedPost(verified, { categories: result.categories, tags: result.tags }),
+          { voice: false }
+        );
+      } catch (error) {
+        wpError = error;
+        console.error("handleNewsFromUrl WP:", error);
+        await reply(
+          ctx,
+          `⚠️ WordPress: ${error.message}\nSigo enviando a redes.`,
+          { voice: false }
+        );
       }
 
-      const session = getSession(ctx.chat.id);
-      session.lastPostId = verified.id;
-
-      await reply(
-        ctx,
-        formatTaxonomyNotice({
-          categories: result.categories,
-          tags: result.tags,
-        }),
-        { voice: false }
-      );
-      await replyLong(
-        ctx,
-        formatUploadedPost(verified, { categories: result.categories, tags: result.tags }),
-        { voice: false }
-      );
-
+      await status(ctx, "📤 Enviando gráfico a redes...");
       await sendSocialCard(ctx, {
         title: spanishTitle,
         imageUrl: article.imageUrl || null,
         bodyText: cleanBody,
       });
+
+      if (wpError && !config.socialCard.enabled) {
+        throw wpError;
+      }
     });
   } catch (error) {
     console.error("handleNewsFromUrl:", error);
@@ -1214,8 +1401,12 @@ async function answerWriteFlowQuestion(ctx, session, text) {
 }
 
 async function remindWriteStep(ctx, wf) {
-  if (wf.step === "title") {
+  if (wf.step === "headline" || wf.step === "headline_confirm") {
+    await ctx.reply("Siguiente paso: confirma el titular (*sí* / *original*) o envíalo.");
+  } else if (wf.step === "title") {
     await ctx.reply("Siguiente paso: responde 1, 2, 3 o escribe tu titular.");
+  } else if (wf.step === "topic") {
+    await ctx.reply("Siguiente paso: envía el tema a desarrollar.");
   } else if (wf.step === "photo") {
     await ctx.reply(
       "Siguiente paso: envía foto, escribe *buscar*, *captura* (si aplica) o *sin foto*."
@@ -1429,6 +1620,160 @@ async function startWpFlow(ctx, text) {
   await ctx.reply("¿Sobre qué tema quieres el artículo?", { voice: false });
 }
 
+function periodistaIntroText() {
+  return [
+    "✍️ /periodista — tu titular manda",
+    "",
+    "1) Me das el titular → solo corrijo ortografía (no cambio la esencia)",
+    "2) Me das el tema y lo desarrollo",
+    "3) Pedimos foto",
+    "4) Subo a WordPress y al webhook de redes",
+    "",
+    "Envía el titular ahora, o /cancelar.",
+  ].join("\n");
+}
+
+async function acceptPeriodistaHeadline(ctx, session, rawTitle) {
+  const original = String(rawTitle || "").trim();
+  if (original.length < 8) {
+    await ctx.reply("El titular es muy corto. Escríbelo completo.", { voice: false });
+    return false;
+  }
+
+  const wf = session.writeFlow;
+  wf.originalTitle = original;
+  await status(ctx, "📝 Revisando ortografía del titular (sin cambiar el sentido)...");
+  let corrected = original;
+  try {
+    corrected = await correctHeadlineSpelling(original);
+  } catch (error) {
+    console.warn("correctHeadlineSpelling:", error.message);
+  }
+
+  wf.selectedTitle = corrected || original;
+  wf.step = "headline_confirm";
+
+  if (normalizeHeadline(corrected) === normalizeHeadline(original)) {
+    await ctx.reply(
+      [
+        `Titular (sin cambios de sentido):`,
+        wf.selectedTitle,
+        "",
+        "Responde *sí* para continuar, o envía el titular tal como lo quieres.",
+      ].join("\n"),
+      { voice: false }
+    );
+    return true;
+  }
+
+  await ctx.reply(
+    [
+      "Solo corrección ortográfica (la esencia no se toca):",
+      "",
+      `Original: ${original}`,
+      `Corregido: ${wf.selectedTitle}`,
+      "",
+      "• *sí* — usar el corregido",
+      "• *original* — usar el tuyo tal cual",
+      "• o envía el titular exactamente como lo quieres",
+    ].join("\n"),
+    { voice: false }
+  );
+  return true;
+}
+
+function normalizeHeadline(text = "") {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function startPeriodistaFlow(ctx, text = "") {
+  const session = getSession(ctx.chat.id);
+  if (session.hyperFlow) cancelHyperFlow(session);
+
+  const initial = String(text || "")
+    .replace(/^\/periodista(?:@\w+)?\s*/i, "")
+    .trim();
+
+  session.writeFlow = emptyWriteFlow();
+  session.writeFlow.source = "periodista";
+  session.writeFlow.step = "headline";
+  session.writeFlow.extraCategorySlugs = parseExtraCategories(initial);
+
+  const headline = stripCategoryDirective(initial);
+  await ctx.reply(periodistaIntroText(), { voice: false });
+
+  if (headline.length >= 8) {
+    await acceptPeriodistaHeadline(ctx, session, headline);
+  }
+}
+
+async function generatePeriodistaDraft(ctx, session) {
+  const wf = session.writeFlow;
+  wf.step = "generating";
+  const lockedTitle = String(wf.selectedTitle || wf.originalTitle || "").trim();
+  if (!lockedTitle) {
+    wf.step = "headline";
+    await ctx.reply("Falta el titular. Envíalo de nuevo.", { voice: false });
+    return;
+  }
+
+  try {
+    wf.research = await Promise.race([
+      researchWithStatus(ctx, wf.topic || lockedTitle),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Búsqueda web tardó demasiado")), 60000)
+      ),
+    ]).catch((error) => {
+      console.warn("researchTopic periodista:", error.message);
+      return { researchText: "", similarNews: [], articleBodies: [], imageUrl: null };
+    });
+
+    if (wf.research.imageUrl && !wf.imageUrl) {
+      wf.imageUrl = wf.research.imageUrl;
+    }
+
+    await status(ctx, "✍️ Desarrollando el tema (titular bloqueado)...");
+    const draft = await writeOriginalNews({
+      topic: wf.topic || lockedTitle,
+      title: lockedTitle,
+      researchText: wf.research.researchText || "",
+    });
+
+    wf.selectedTitle = lockedTitle;
+    wf.body_html = finalizeNewsHtml(coerceArticleHtml(draft.body_html), {
+      skipSource: true,
+    });
+    wf.excerpt = draft.excerpt || "";
+    wf.step = "preview";
+
+    await reply(
+      ctx,
+      [
+        `Titular (intacto): ${lockedTitle}`,
+        wf.excerpt ? `\n${wf.excerpt}` : "",
+        "",
+        htmlToPlainText(wf.body_html).slice(0, 900),
+        htmlToPlainText(wf.body_html).length > 900 ? "…" : "",
+        "",
+        "Responde *sí* para pasar a la foto, o *cancelar*.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      { voice: false }
+    );
+  } catch (error) {
+    console.error("generatePeriodistaDraft:", error);
+    wf.step = "topic";
+    await ctx.reply(`❌ Error al redactar: ${error.message}`, { voice: false });
+  }
+}
+
 async function previewFeaturedImage(ctx, { buffer, url, caption, wf = null }) {
   const defaultCaption =
     "¿Usamos esta imagen destacada? Responde *sí* para publicar, *buscar* otra, o envía otra foto.";
@@ -1479,15 +1824,19 @@ async function askFeaturedImage(ctx, session) {
   const lines = [
     `Titular: ${wf.selectedTitle}`,
     "",
-    wf.source === "wp"
+    wf.source === "wp" || wf.source === "periodista"
       ? "¿Foto destacada para publicar en WordPress?"
       : "¿Foto destacada para el artículo?",
     "• Envía una imagen",
     "• Escribe *buscar* — busco otra en la web",
   ];
 
-  if (wf.source === "ocr" && wf.captureBuffer) {
-    lines.push("• Escribe *captura* — usar imagen del screenshot");
+  if ((wf.source === "ocr" || wf.source === "nota") && wf.captureBuffer) {
+    lines.push(
+      wf.source === "nota"
+        ? "• Escribe *documento* — usar imagen sacada del documento"
+        : "• Escribe *captura* — usar imagen del screenshot"
+    );
   }
 
   lines.push("• Escribe *sin foto* — publicar sin imagen destacada");
@@ -1503,6 +1852,18 @@ async function askFeaturedImage(ctx, session) {
       caption: fromSocial
         ? "Imagen de la publicación. Responde *sí*, *buscar* otra, o envía tu foto."
         : "Imagen sugerida. Responde *sí*, *buscar* otra, o envía tu foto.",
+    });
+    return;
+  }
+
+  if (wf.imageBuffer) {
+    await previewFeaturedImage(ctx, {
+      buffer: wf.imageBuffer,
+      wf,
+      caption:
+        wf.source === "nota"
+          ? "Imagen del documento. Responde *sí*, *buscar* otra, o envía tu foto."
+          : "Imagen candidata. Responde *sí*, *buscar* otra, o envía tu foto.",
     });
     return;
   }
@@ -1542,6 +1903,12 @@ async function publishWrittenNews(ctx) {
           html = coerceArticleHtml(wf.body_html);
         }
         excerpt = wf.excerpt || "";
+      } else if (wf.source === "periodista") {
+        await status(ctx, "1/3 ✍️ Preparando artículo...");
+        // El titular del periodista no se reescribe: solo la corrección ya aceptada.
+        spanishTitle = String(wf.selectedTitle || wf.originalTitle || "").trim();
+        html = finalizeNewsHtml(coerceArticleHtml(wf.body_html), { skipSource: true });
+        excerpt = wf.excerpt || "";
       } else if (wf.source === "wp") {
         await status(ctx, "1/3 ✍️ Preparando artículo...");
         spanishTitle = await translateToSpanish(wf.selectedTitle, {
@@ -1577,20 +1944,31 @@ async function publishWrittenNews(ctx) {
       if (wf.imageBuffer) {
         await status(
           ctx,
-          wf.source === "ocr" || wf.source === "social" || wf.source === "wp"
+          wf.source === "ocr" ||
+            wf.source === "social" ||
+            wf.source === "wp" ||
+            wf.source === "periodista"
             ? "2/3 🖼️ Subiendo imagen destacada..."
             : "3/4 🖼️ Subiendo tu imagen..."
         );
-        const media = await uploadImageFromBuffer(
-          wf.imageBuffer,
-          `noticia-${Date.now()}.jpg`,
-          wf.imageMimeType || "image/jpeg"
-        );
-        featuredMediaId = media.id;
+        try {
+          const media = await uploadImageFromBuffer(
+            wf.imageBuffer,
+            `noticia-${Date.now()}.jpg`,
+            wf.imageMimeType || "image/jpeg"
+          );
+          featuredMediaId = media.id;
+        } catch (error) {
+          console.warn("Imagen destacada WP:", error.message);
+          await status(ctx, `⚠️ WordPress no recibió la imagen: ${error.message}`);
+        }
       } else if (wf.imageUrl) {
         await status(
           ctx,
-          wf.source === "ocr" || wf.source === "social" || wf.source === "wp"
+          wf.source === "ocr" ||
+            wf.source === "social" ||
+            wf.source === "wp" ||
+            wf.source === "periodista"
             ? "2/3 🖼️ Subiendo imagen destacada..."
             : "3/4 🖼️ Subiendo imagen encontrada..."
         );
@@ -1604,7 +1982,10 @@ async function publishWrittenNews(ctx) {
       } else {
         await status(
           ctx,
-          wf.source === "ocr" || wf.source === "social" || wf.source === "wp"
+          wf.source === "ocr" ||
+            wf.source === "social" ||
+            wf.source === "wp" ||
+            wf.source === "periodista"
             ? "2/3 ℹ️ Sin imagen destacada."
             : "3/4 ℹ️ Sin imagen destacada."
         );
@@ -1612,50 +1993,68 @@ async function publishWrittenNews(ctx) {
 
       await status(
         ctx,
-        wf.source === "ocr" || wf.source === "social" || wf.source === "wp"
+        wf.source === "ocr" ||
+          wf.source === "social" ||
+          wf.source === "wp" ||
+          wf.source === "periodista"
           ? "3/3 📤 Subiendo a WordPress..."
           : "4/4 📤 Subiendo a WordPress..."
       );
       const postStatus = config.autoPublishUrls ? "publish" : config.defaultPostStatus;
       html = coerceArticleHtml(html);
-      const result = await createPost({
-        title: spanishTitle,
-        text: excerpt,
-        htmlContent: html,
-        featuredMediaId,
-        extraCategorySlugs: wf.extraCategorySlugs,
-        status: postStatus,
-      });
+      let wpError = null;
+      try {
+        const result = await createPost({
+          title: spanishTitle,
+          text: excerpt,
+          htmlContent: html,
+          featuredMediaId,
+          extraCategorySlugs: wf.extraCategorySlugs,
+          status: postStatus,
+        });
 
-      const verified = await getPost(result.post.id);
-      if (!verified?.id) {
-        throw new Error("WordPress no confirmó el post.");
+        const verified = await getPost(result.post.id);
+        if (!verified?.id) {
+          throw new Error("WordPress no confirmó el post.");
+        }
+
+        session.lastPostId = verified.id;
+        await reply(
+          ctx,
+          formatTaxonomyNotice({
+            categories: result.categories,
+            tags: result.tags,
+          }),
+          { voice: false }
+        );
+        await replyLong(
+          ctx,
+          formatUploadedPost(verified, { categories: result.categories, tags: result.tags }),
+          { voice: false }
+        );
+      } catch (error) {
+        wpError = error;
+        console.error("publishWrittenNews WP:", error);
+        await reply(
+          ctx,
+          `⚠️ WordPress: ${error.message}\nSigo enviando a redes.`,
+          { voice: false }
+        );
       }
 
       const cardImageBuffer = wf.imageBuffer || wf.captureBuffer || null;
       const cardImageUrl = wf.imageUrl || null;
-
-      session.lastPostId = verified.id;
-      session.writeFlow = null;
-
-      await reply(
-        ctx,
-        formatTaxonomyNotice({
-          categories: result.categories,
-          tags: result.tags,
-        }),
-        { voice: false }
-      );
-      await replyLong(
-        ctx,
-        formatUploadedPost(verified, { categories: result.categories, tags: result.tags }),
-        { voice: false }
-      );
-
       const captionSource =
         [excerpt, htmlToPlainText(html)].filter(Boolean).join(" ").trim() ||
         excerpt;
 
+      if (!wpError) {
+        session.writeFlow = null;
+      } else {
+        wf.step = "photo";
+      }
+
+      await status(ctx, "📤 Enviando gráfico a redes...");
       await sendSocialCard(ctx, {
         title: spanishTitle,
         imageBuffer: cardImageBuffer,
@@ -1688,9 +2087,13 @@ async function handleWritePhotoStep(ctx, text) {
     return;
   }
 
-  if (/^(captura|usar captura)$/i.test(lower)) {
+  if (/^(captura|usar captura|documento|usar documento)$/i.test(lower)) {
     if (!wf.captureBuffer) {
-      await ctx.reply("No hay captura guardada. Envía una foto o escribe *buscar*.");
+      await ctx.reply(
+        wf.source === "nota"
+          ? "No hay imagen del documento. Envía una foto o escribe *buscar*."
+          : "No hay captura guardada. Envía una foto o escribe *buscar*."
+      );
       return;
     }
     wf.imageBuffer = wf.captureBuffer;
@@ -1699,7 +2102,9 @@ async function handleWritePhotoStep(ctx, text) {
     await previewFeaturedImage(ctx, {
       buffer: wf.imageBuffer,
       caption:
-        "Imagen del screenshot. Responde *sí* para publicar, *buscar* otra, o envía otra foto.",
+        wf.source === "nota"
+          ? "Imagen del documento. Responde *sí* para publicar, *buscar* otra, o envía otra foto."
+          : "Imagen del screenshot. Responde *sí* para publicar, *buscar* otra, o envía otra foto.",
     });
     return;
   }
@@ -1724,7 +2129,7 @@ async function handleWritePhotoStep(ctx, text) {
   }
 
   await ctx.reply(
-    "Envía una foto, escribe *buscar*, *captura* (si aplica), *sin foto*, o *sí* si ya viste la imagen."
+    "Envía una foto, escribe *buscar*, *captura*/*documento* (si aplica), *sin foto*, o *sí* si ya viste la imagen."
   );
 }
 
@@ -1751,9 +2156,45 @@ async function handleWriteFlowMessage(ctx, text) {
 
   try {
     if (/^\/cancelar$/i.test(text) || /^cancelar$/i.test(text)) {
-      const wasWp = wf.source === "wp";
+      const wasArticle = wf.source === "wp" || wf.source === "periodista";
       cancelWriteFlow(session);
-      await ctx.reply(wasWp ? "Artículo WordPress cancelado." : "Redacción cancelada.");
+      await ctx.reply(wasArticle ? "Artículo cancelado." : "Redacción cancelada.");
+      return;
+    }
+
+    if (wf.step === "headline") {
+      await acceptPeriodistaHeadline(ctx, session, text);
+      return;
+    }
+
+    if (wf.step === "headline_confirm") {
+      const lower = text.toLowerCase().trim();
+      if (/^(sí|si|ok|dale|usar|corregido)$/i.test(lower)) {
+        wf.step = "topic";
+        await ctx.reply(
+          [
+            `Titular fijado: ${wf.selectedTitle}`,
+            "",
+            "Ahora dime el tema o ángulo a desarrollar (no cambio el titular).",
+          ].join("\n"),
+          { voice: false }
+        );
+        return;
+      }
+      if (/^(original|así|asi|no|tal cual)$/i.test(lower)) {
+        wf.selectedTitle = wf.originalTitle || wf.selectedTitle;
+        wf.step = "topic";
+        await ctx.reply(
+          [
+            `Titular fijado: ${wf.selectedTitle}`,
+            "",
+            "Ahora dime el tema o ángulo a desarrollar (no cambio el titular).",
+          ].join("\n"),
+          { voice: false }
+        );
+        return;
+      }
+      await acceptPeriodistaHeadline(ctx, session, text);
       return;
     }
 
@@ -1763,12 +2204,18 @@ async function handleWriteFlowMessage(ctx, text) {
         await ctx.reply(
           wf.source === "wp"
             ? "Indica el tema del artículo."
-            : "Indica el tema de la noticia."
+            : wf.source === "periodista"
+              ? "Indica el tema o ángulo a desarrollar."
+              : "Indica el tema de la noticia."
         );
         return;
       }
       if (wf.source === "wp") {
         await generateWpDraft(ctx, session);
+        return;
+      }
+      if (wf.source === "periodista") {
+        await generatePeriodistaDraft(ctx, session);
         return;
       }
       await askWriteTitles(ctx, session);
@@ -1783,6 +2230,13 @@ async function handleWriteFlowMessage(ctx, text) {
     if (wf.step === "preview") {
       if (isWpPreviewConfirm(text)) {
         await askFeaturedImage(ctx, session);
+        return;
+      }
+      if (wf.source === "periodista") {
+        await ctx.reply(
+          "El titular ya está fijado. Responde *sí* para la foto, o *cancelar*.",
+          { voice: false }
+        );
         return;
       }
       const newTitle = text.trim();
@@ -1915,6 +2369,76 @@ async function handleNewsFromImage(
   } catch (error) {
     console.error("handleNewsFromImage:", error);
     await ctx.reply(`❌ Error: ${error.message}`);
+  }
+}
+
+async function handleNoteFromDocument(
+  ctx,
+  fileBuffer,
+  mimeType,
+  fileName = "",
+  userHint = "",
+  extraCategorySlugs = []
+) {
+  try {
+    await status(ctx, "1/3 📄 Leyendo el documento...");
+    const { text, images } = await ocrDocument(fileBuffer, mimeType);
+
+    await status(ctx, "2/3 ✍️ Extrayendo información y redactando la nota...");
+    const draft = await buildNoteFromDocument({
+      docText: text,
+      userHint,
+      fileName,
+    });
+
+    const session = getSession(ctx.chat.id);
+    const docImage = images?.[0] || null;
+
+    session.writeFlow = {
+      ...emptyWriteFlow(),
+      source: "nota",
+      step: "photo",
+      topic: draft.title,
+      selectedTitle: draft.title,
+      excerpt: draft.excerpt || "",
+      body_html: finalizeNewsHtml(coerceArticleHtml(draft.body_html), {
+        skipSource: true,
+      }),
+      captureBuffer: docImage?.buffer || null,
+      captureMime: docImage?.mimeType || "image/jpeg",
+      imageBuffer: docImage?.buffer || null,
+      imageMimeType: docImage?.mimeType || null,
+      extraCategorySlugs,
+      research: null,
+    };
+    session.photoIntent = null;
+
+    const lines = [
+      "✅ Documento leído.",
+      `Titular: ${draft.title}`,
+    ];
+    if (draft.summary) {
+      lines.push("", "Puntos clave:", draft.summary);
+    }
+    lines.push("");
+
+    if (docImage?.buffer) {
+      lines.push(
+        "Saqué una imagen del documento. La uso como candidata a foto destacada."
+      );
+      await ctx.reply(lines.join("\n"), { voice: false });
+      await askFeaturedImage(ctx, session);
+      return;
+    }
+
+    lines.push(
+      "No encontré foto en el documento. Envía una imagen destacada, escribe *buscar* o *sin foto*."
+    );
+    await ctx.reply(lines.join("\n"), { voice: false });
+    await askFeaturedImage(ctx, session);
+  } catch (error) {
+    console.error("handleNoteFromDocument:", error);
+    await ctx.reply(`❌ Nota: ${error.message}`);
   }
 }
 
@@ -2058,6 +2582,9 @@ async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
 
     const url = extractFirstUrl(trimmed);
     if (url) {
+      if (await maybeAskSocialLinkChoice(ctx, url, parseExtraCategories(trimmed))) {
+        return;
+      }
       if (session.writeFlow) cancelWriteFlow(session);
       await handleNewsFromUrl(ctx, url, parseExtraCategories(trimmed));
       return;
@@ -2130,6 +2657,11 @@ async function handlePhoto(ctx) {
       return;
     }
 
+    if (termometroAwaitingPhoto(session)) {
+      await handleTermometroPhoto(ctx, imageBuffer, mimeType);
+      return;
+    }
+
     if (session.mode === "chat") {
       await ctx.reply("👁️ Analizando imagen...", { voice: false });
       const description = await describeImage(
@@ -2148,11 +2680,29 @@ async function handlePhoto(ctx) {
 
     const doCrop = wantsCrop(caption, session.photoIntent);
     const doNews = wantsNewsOcr(caption, session.photoIntent);
+    const doNota = wantsNota(caption, session.photoIntent);
 
     if (doCrop) {
       const cropped = await processCrop(ctx, imageBuffer, mimeType, caption);
       imageBuffer = cropped.buffer;
       mimeType = cropped.mimeType;
+    }
+
+    if (doNota) {
+      const extra = [
+        ...session.buffer.extraCategories,
+        ...parseExtraCategories(caption),
+      ];
+      await handleNoteFromDocument(
+        ctx,
+        imageBuffer,
+        mimeType,
+        "foto-documento.jpg",
+        caption,
+        extra
+      );
+      session.photoIntent = null;
+      return;
     }
 
     if (doNews) {
@@ -2392,6 +2942,18 @@ export async function startBot() {
 
   const bot = new Telegraf(config.telegram.token);
   bot.use(guard);
+  bot.use(async (ctx, next) => {
+    const orig = ctx.reply.bind(ctx);
+    ctx.reply = async (text, extra) => {
+      const chunks = splitTelegramChunks(text);
+      let last;
+      for (let i = 0; i < chunks.length; i++) {
+        last = await orig(chunks[i], i === 0 ? extra : undefined);
+      }
+      return last;
+    };
+    return next();
+  });
 
   bot.start(async (ctx) => {
     getSession(ctx.chat.id).mode = "auto";
@@ -2655,6 +3217,15 @@ export async function startBot() {
     await startWriteFlow(ctx, text ? `/escribir ${text}` : "/escribir");
   });
 
+  bot.command("periodista", async (ctx) => {
+    try {
+      await startPeriodistaFlow(ctx, ctx.message.text || "");
+    } catch (error) {
+      console.error("startPeriodistaFlow:", error);
+      await ctx.reply(`❌ Error: ${error.message}`, { voice: false });
+    }
+  });
+
   bot.command("wp", async (ctx) => {
     const text = ctx.message.text || "";
     try {
@@ -2679,22 +3250,33 @@ export async function startBot() {
       await reply(ctx, "Envío de /video o /trad cancelado.", { voice: false });
       return;
     }
+    if (session.pendingLinkChoice) {
+      session.pendingLinkChoice = null;
+      await reply(ctx, "Enlace cancelado.", { voice: false });
+      return;
+    }
     if (session.hyperFlow) {
       cancelHyperFlow(session);
       await reply(ctx, "Modo HyperFrames cancelado.", { voice: false });
       return;
     }
+    if (isTermometroActive(session)) {
+      cancelTermometroFlow(session);
+      await reply(ctx, termometroCancelText(), { voice: false });
+      return;
+    }
     if (!session.writeFlow) {
-      await reply(ctx, "No hay redacción, /video, /trad ni modo /hyper en curso.", {
+      await reply(ctx, "No hay redacción, enlace, /video, /trad ni modo /hyper en curso.", {
         voice: false,
       });
       return;
     }
-    const wasWp = session.writeFlow.source === "wp";
+    const wasWp =
+      session.writeFlow.source === "wp" || session.writeFlow.source === "periodista";
     cancelWriteFlow(session);
     await reply(
       ctx,
-      wasWp ? "Artículo WordPress cancelado." : "Redacción cancelada.",
+      wasWp ? "Artículo cancelado." : "Redacción cancelada.",
       { voice: false }
     );
   });
@@ -2722,6 +3304,26 @@ export async function startBot() {
     );
   });
 
+  bot.command("nota", async (ctx) => {
+    const hint = ctx.message.text.replace(/^\/nota(?:@\w+)?\s*/i, "").trim();
+    const session = getSession(ctx.chat.id);
+    session.photoIntent = "nota";
+    if (hint) session.buffer.text = hint;
+    await reply(
+      ctx,
+      [
+        "📄 /nota — envía un documento",
+        "",
+        "Acepta: PDF o foto del documento.",
+        "Extraigo la información, redacto la nota y, si el archivo trae imagen, la uso; si no, te pido la foto destacada.",
+        hint ? `\nNota: ${hint}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      { voice: false }
+    );
+  });
+
   bot.command("voz", async (ctx) => {
     const arg = ctx.message.text.replace(/^\/voz\s*/i, "").trim().toLowerCase();
     const session = getSession(ctx.chat.id);
@@ -2737,6 +3339,18 @@ export async function startBot() {
   bot.command("escuchar", async (ctx) => {
     await reply(ctx, "Envía audio y solo lo transcribo.", { voice: false });
     getSession(ctx.chat.id).transcribeOnlyNext = true;
+  });
+
+  bot.command("foto", async (ctx) => {
+    const session = getSession(ctx.chat.id);
+    session.termometroFlow = emptyTermometroFlow();
+    const initial = ctx.message.text.replace(/^\/foto\s*/i, "").trim();
+    if (initial) {
+      const handled = handleTermometroText(session, initial);
+      await reply(ctx, handled.reply, { voice: false });
+      return;
+    }
+    await reply(ctx, termometroIntroText(), { voice: false });
   });
 
   bot.command("mas", async (ctx) => {
@@ -2825,6 +3439,70 @@ export async function startBot() {
 
   bot.on("photo", handlePhoto);
 
+  bot.on("document", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    if (isEchoMode(session)) {
+      await ctx.reply(ctx.message.document?.file_name || "documento");
+      return;
+    }
+
+    const doc = ctx.message.document;
+    if (!doc?.file_id) {
+      await ctx.reply("No pude leer ese archivo.");
+      return;
+    }
+
+    const mime = String(doc.mime_type || "").toLowerCase();
+    const name = doc.file_name || "documento";
+    const caption = ctx.message.caption || session.buffer.text || "";
+    const waitingNota =
+      session.photoIntent === "nota" ||
+      session.writeFlow?.source === "nota" ||
+      /\bnota\b/i.test(caption);
+
+    const isPdf = mime.includes("pdf") || /\.pdf$/i.test(name);
+    const isImage =
+      mime.startsWith("image/") ||
+      /\.(jpe?g|png|webp|gif)$/i.test(name);
+
+    if (!waitingNota && !isPdf) {
+      await ctx.reply(
+        "Si quieres convertir un documento en nota, usa /nota y luego envía el PDF o la foto."
+      );
+      return;
+    }
+
+    if (!isPdf && !isImage) {
+      await ctx.reply(
+        "Formato no soportado. Envía un PDF o una imagen del documento (JPG/PNG)."
+      );
+      return;
+    }
+
+    try {
+      if (doc.file_size && doc.file_size > 18 * 1024 * 1024) {
+        await ctx.reply("El archivo es muy pesado (máx. ~18 MB).");
+        return;
+      }
+      const { buffer, ext } = await downloadTelegramFile(ctx, doc.file_id);
+      const mimeType =
+        mime ||
+        (isPdf ? "application/pdf" : mimeFromBuffer(buffer) || `image/${ext || "jpeg"}`);
+      const extra = [
+        ...session.buffer.extraCategories,
+        ...parseExtraCategories(caption),
+      ];
+      session.buffer.text = "";
+      await handleNoteFromDocument(ctx, buffer, mimeType, name, caption, extra);
+      session.photoIntent = null;
+    } catch (error) {
+      console.error("document/nota:", error);
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
   bot.on("voice", async (ctx) => {
     const session = getSession(ctx.chat.id);
     const transcribeOnly = session.transcribeOnlyNext;
@@ -2875,6 +3553,52 @@ export async function startBot() {
         session.pendingTradJob = null;
       }
       session.pendingSocialVideo = null;
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.action(/^link:(video|news|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+
+    const session = getSession(ctx.chat.id);
+    const pending = session.pendingLinkChoice;
+    const action = ctx.match[1];
+
+    try {
+      if (action === "cancel") {
+        session.pendingLinkChoice = null;
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("Enlace cancelado.");
+        return;
+      }
+      if (!pending?.url) {
+        await ctx.answerCbQuery("No hay enlace pendiente");
+        await ctx.reply(
+          "No hay enlace pendiente. Pega un URL de YouTube, Instagram, Facebook o X."
+        );
+        return;
+      }
+
+      session.pendingLinkChoice = null;
+      if (action === "video") {
+        await ctx.answerCbQuery("Video");
+        await processSocialVideoUrl(ctx, pending.url);
+        return;
+      }
+
+      await ctx.answerCbQuery("Noticia");
+      await handleNewsFromUrl(ctx, pending.url, pending.extraCategories || []);
+    } catch (error) {
+      console.error("link choice:", error);
       try {
         await ctx.answerCbQuery("Error");
       } catch {
@@ -2986,8 +3710,11 @@ export async function startBot() {
     }
 
     if (url) {
-      if (session.writeFlow) cancelWriteFlow(session);
       try {
+        if (await maybeAskSocialLinkChoice(ctx, url, parseExtraCategories(trimmed))) {
+          return;
+        }
+        if (session.writeFlow) cancelWriteFlow(session);
         await handleNewsFromUrl(ctx, url, parseExtraCategories(trimmed));
       } catch (error) {
         console.error("text handler URL:", error);
@@ -3021,7 +3748,21 @@ export async function startBot() {
         await handleHyperFlowMessage(ctx, trimmed);
       } catch (error) {
         console.error("hyperFlow:", error);
-        await ctx.reply(`❌ Error: ${error.message}`);
+        await ctx.reply(`❌ ${error.message}`);
+      }
+      return;
+    }
+
+    if (isTermometroActive(session)) {
+      try {
+        const handled = handleTermometroText(session, trimmed);
+        if (handled) {
+          await reply(ctx, handled.reply, { voice: false });
+          return;
+        }
+      } catch (error) {
+        console.error("termometroFlow text:", error);
+        await ctx.reply(`❌ ${error.message}`);
       }
       return;
     }

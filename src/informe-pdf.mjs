@@ -103,13 +103,13 @@ export async function writeInformePdf({
           .fontSize(10)
           .text(`Término: ${item.term || "—"}  |  Tono: ${(item.tono || "neutral").toUpperCase()}`);
 
-        if (item.medioNombre || item.medio) {
+        if (item.medioNombre) {
           doc.moveDown(0.15);
           doc.font("Helvetica").fillColor("#334155").text("Medio: ", { continued: true });
           doc
             .font("Helvetica-Bold")
             .fillColor("#0f172a")
-            .text(item.medioNombre || item.medio);
+            .text(item.medioNombre);
         }
 
         if (item.channel !== "radio" && item.motivo) {

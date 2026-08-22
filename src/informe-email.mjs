@@ -40,7 +40,7 @@ function relevanceBadge(relevancia = "") {
 function buildMediaToneLines(items) {
   const byMedia = new Map();
   for (const item of items) {
-    const name = (item.medioNombre || item.medio || "Medio").trim();
+    const name = (item.medioNombre || "Medio").trim();
     if (!byMedia.has(name)) {
       byMedia.set(name, { positiva: 0, negativa: 0, neutral: 0, total: 0 });
     }
@@ -213,10 +213,7 @@ function itemCard(item, index) {
       ? `<p style="margin:6px 0 0;"><a href="${escapeHtml(item.txtUrl)}" style="color:#0f766e;font-weight:600;text-decoration:none;">📄 Ver transcripción (TXT)</a></p>`
       : "";
 
-  const medioLabel =
-    item.medioNombre ||
-    item.medio ||
-    "";
+  const medioLabel = (item.medioNombre || "").trim();
   const medioLine = medioLabel
     ? `<p style="margin:0 0 8px;font-size:14px;color:#0f172a;"><strong>Medio:</strong> <strong style="color:#0f172a;">${escapeHtml(medioLabel)}</strong></p>`
     : "";
@@ -348,9 +345,7 @@ export function buildInformeEmail({ client, items, displayDate, stamp, pdfFilena
       `--- ${i + 1}. ${item.tema || item.term} ---`,
       `Término: ${item.term}`,
       `Tono: ${tonoLabel(item.tono)}`,
-      item.medioNombre || item.medio
-        ? `Medio: ${item.medioNombre || item.medio}`
-        : "",
+      item.medioNombre ? `Medio: ${item.medioNombre}` : "",
       !item.channel || item.channel !== "radio"
         ? item.motivo
           ? `Motivo: ${item.motivo}`
@@ -449,6 +444,17 @@ export async function prepareClientEmail(
   return { analisis, client, items, email, pdf, attachments, channel };
 }
 
+const FIXED_MONITORING_CC = "belgicajr@gmail.com";
+
+export function mergeFixedCc(cc = "") {
+  const existing = String(cc || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((e) => e.toLowerCase() !== FIXED_MONITORING_CC.toLowerCase());
+  return [FIXED_MONITORING_CC, ...existing].join(", ");
+}
+
 async function sendClientPair({
   channel,
   date,
@@ -458,6 +464,8 @@ async function sendClientPair({
   destEdesurCc,
   dryRun,
 }) {
+  const intrantCc = mergeFixedCc(destIntrantCc);
+  const edesurCc = mergeFixedCc(destEdesurCc);
   const edesurOn = config.edesurEnabled !== false;
   const intrant = await prepareClientEmail("intrant", date, { channel });
   const edesur = edesurOn
@@ -470,7 +478,7 @@ async function sendClientPair({
         client: "intrant",
         channel,
         to: destIntrant,
-        cc: destIntrantCc || null,
+        cc: intrantCc,
         count: intrant.items.length,
         subject: intrant.email.subject,
         pdf: intrant.pdf.path,
@@ -481,7 +489,7 @@ async function sendClientPair({
         client: "edesur",
         channel,
         to: destEdesur,
-        cc: destEdesurCc || null,
+        cc: edesurCc,
         count: edesur.items.length,
         subject: edesur.email.subject,
         pdf: edesur.pdf.path,
@@ -501,7 +509,7 @@ async function sendClientPair({
       results,
       intrant: {
         to: destIntrant,
-        cc: destIntrantCc || null,
+        cc: intrantCc,
         count: intrant.items.length,
         subject: intrant.email.subject,
         pdf: intrant.pdf.path,
@@ -509,7 +517,7 @@ async function sendClientPair({
       edesur: edesur
         ? {
             to: destEdesur,
-            cc: destEdesurCc || null,
+            cc: edesurCc,
             count: edesur.items.length,
             subject: edesur.email.subject,
             pdf: edesur.pdf.path,
@@ -521,7 +529,7 @@ async function sendClientPair({
   const results = [];
   const sentIntrant = await sendEmail({
     to: destIntrant,
-    cc: destIntrantCc,
+    cc: intrantCc,
     ...intrant.email,
     attachments: intrant.attachments,
   });
@@ -538,7 +546,7 @@ async function sendClientPair({
   if (edesur && destEdesur) {
     const sentEdesur = await sendEmail({
       to: destEdesur,
-      cc: destEdesurCc,
+      cc: edesurCc,
       ...edesur.email,
       attachments: edesur.attachments,
     });

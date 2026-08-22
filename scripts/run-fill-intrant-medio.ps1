@@ -15,9 +15,9 @@ if (Test-Path $envPath) {
 
 $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 if ($edesurOn) {
-    Add-Content -Path $LogFile -Value "[$stamp] Mantener Sheets Intrant (medio) + Edesur (medio/titulo/fecha)"
+    Add-Content -Path $LogFile -Value "[$stamp] Mantener Sheets Intrant (medio + formato fecha) + Edesur (medio/titulo/fecha)"
 } else {
-    Add-Content -Path $LogFile -Value "[$stamp] Mantener Sheet Intrant (medio) — Edesur OFF"
+    Add-Content -Path $LogFile -Value "[$stamp] Mantener Sheet Intrant (medio + formato fecha) — Edesur OFF"
 }
 
 & $Node 'scripts/fill-intrant-medio.mjs' *>> $LogFile 2>&1

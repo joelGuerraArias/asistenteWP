@@ -1,5 +1,6 @@
 /**
- * Completa "medio" vacío en Sheet Intrant desde la URL de la noticia.
+ * Completa "medio" vacío y normaliza formato de fecha (sin cambiar el día)
+ * en Sheet Intrant.
  *
  *   node scripts/fill-intrant-medio.mjs
  *   node scripts/fill-intrant-medio.mjs --dry-run
@@ -10,6 +11,7 @@ import { parseSourceFromUrl } from "../src/news-format.mjs";
 import {
   fillMissingMedioInSheet,
   isMissingMedio,
+  padFechaFormatOnly,
 } from "../src/sheets-alerts.mjs";
 
 const dryRun = process.argv.includes("--dry-run");
@@ -25,7 +27,14 @@ try {
     });
     const values = full.data.values || [];
     let missing = 0;
+    let fechaPad = 0;
     for (const row of values.slice(1)) {
+      const fechaRaw = String(row[0] || "").trim();
+      const padded = padFechaFormatOnly(fechaRaw);
+      if (padded && padded !== fechaRaw) {
+        fechaPad += 1;
+        if (fechaPad <= 10) console.log(`fecha: ${fechaRaw} → ${padded}`);
+      }
       const medio = String(row[4] || "").trim();
       const url = String(row[6] || "").trim();
       if (!isMissingMedio(medio) || !/^https?:\/\//i.test(url)) continue;
@@ -39,13 +48,14 @@ try {
       }
     }
     console.log(`Sin medio (con URL): ${missing} de ${Math.max(0, values.length - 1)}`);
+    console.log(`Fechas a normalizar (solo formato): ${fechaPad}`);
     process.exit(0);
   }
 
-  console.log("Revisando Sheet Intrant: filas sin medio…");
+  console.log("Revisando Sheet Intrant: medio vacío + formato de fecha…");
   const result = await fillMissingMedioInSheet();
   console.log(
-    `Revisadas: ${result.checked} | Completadas: ${result.filled}`
+    `Revisadas: ${result.checked} | Medio: ${result.filled} | Fecha formato: ${result.fechaNormalized || 0}`
   );
   for (const s of result.samples) {
     console.log(`  fila ${s.row}: ${s.titulo} → ${s.medio}`);

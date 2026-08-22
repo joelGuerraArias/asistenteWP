@@ -182,7 +182,7 @@ export const config = {
       process.env.INFORMES_DIR ||
       "C:\\Users\\Joel Guerra\\Desktop\\informes",
     emailIntrant: process.env.INFORME_EMAIL_INTRANT || "",
-    emailIntrantCc: process.env.INFORME_EMAIL_INTRANT_CC || "",
+    emailIntrantCc: process.env.INFORME_EMAIL_INTRANT_CC || "belgicajr@gmail.com",
     emailEdesur: process.env.INFORME_EMAIL_EDESUR || "",
     emailEdesurCc: process.env.INFORME_EMAIL_EDESUR_CC || "",
     /** Horarios locales HH:MM — por defecto 17:00 y 23:00 */
@@ -223,7 +223,7 @@ export const config = {
     serviceAccountJson: process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "",
     filters: String(
       process.env.GOOGLE_ALERTS_FILTERS ||
-        "intrant,digesett,rdvial,rd vial,seguridad vial,milton morrison,miltton morrison,transporte,transportes,pasaje,licencia de conducir"
+        "intrant,digesett,rdvial,rd vial,seguridad vial,milton morrison,miltton morrison,juan manuel mendez,transporte,transportes,pasaje,licencia de conducir"
     )
       .split(",")
       .map((s) => s.trim())
@@ -289,6 +289,10 @@ export const config = {
       enabled: process.env.REMOTION_ENABLED !== "false",
       dir: join(root, process.env.REMOTION_DIR || "video/remotion"),
     },
+    frase: {
+      dir: join(root, process.env.FRASE_HYPERFRAMES_DIR || "video/frase-celebre"),
+      cronTime: process.env.FRASE_CRON_TIME || "08:00",
+    },
     heygen: {
       enabled: process.env.HEYGEN_VIDEO !== "false",
       apiKey: process.env.HEYGEN_API_KEY || "",
@@ -306,6 +310,43 @@ export const config = {
       200,
       Math.max(10, Number(process.env.SOCIAL_VIDEO_MAX_MB || 90))
     ),
+  },
+  termometro: {
+    framePath: process.env.TERMOMETRO_FRAME_PATH
+      ? join(root, process.env.TERMOMETRO_FRAME_PATH)
+      : join(root, "assets", "termometro-frame.png"),
+    durationSeconds: Math.min(60, Math.max(5, Number(process.env.TERMOMETRO_DURATION_SECONDS || 30))),
+    fps: Math.min(60, Math.max(15, Number(process.env.TERMOMETRO_FPS || 30))),
+    typewriterStartSeconds: Math.min(20, Math.max(0, Number(process.env.TERMOMETRO_TYPEWRITER_START_SECONDS || 3))),
+    typewriterDurationSeconds: Math.min(20, Math.max(1, Number(process.env.TERMOMETRO_TYPEWRITER_DURATION_SECONDS || 4))),
+  },
+  dgcp: {
+    url:
+      process.env.DGCP_DIGEST_URL ||
+      "https://comunidad.comprasdominicana.gob.do/Public/Tendering/ContractNoticeManagement/Index",
+    to: process.env.DGCP_DIGEST_TO || "autosemana@gmail.com",
+    keywords: String(
+      process.env.DGCP_DIGEST_KEYWORDS ||
+        "web,aplicación,aplicacion,aplicaciones,streaming,monitoreo,relaciones públicas,relaciones publicas,encuestas,python,react,montaje,eventos,tecnología,tecnologia,zoom,adobe,fortinet,openai,claude,inteligencia artificial,plataforma,informático,informatico,equipos informáticos,equipos informaticos,accesorios informáticos,accesorios informaticos,licencia,licencias,antivirus,suscripción,suscripcion,seguridad,comunicaciones,mantenimiento de vehículos,mantenimiento de vehiculos"
+    )
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    /** Horarios locales HH:MM — por defecto 08:00 y 17:00 */
+    cronTimes: (() => {
+      const raw = process.env.DGCP_DIGEST_CRON_TIMES || "08:00,17:00";
+      return String(raw)
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((t) => {
+          const [h, m = "0"] = t.split(":");
+          return {
+            hour: Math.min(23, Math.max(0, Number(h) || 0)),
+            minute: Math.min(59, Math.max(0, Number(m) || 0)),
+          };
+        });
+    })(),
   },
   /** /trad — doblaje + subtítulos 9:16 */
   trad: {

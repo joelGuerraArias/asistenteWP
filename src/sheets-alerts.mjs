@@ -177,8 +177,21 @@ async function batchUpdateCells(sheets, spreadsheetId, updates) {
   }
 }
 
+/** Normaliza formato a dd/mm/yyyy SIN cambiar día/mes/año ni usar URL. */
+export function padFechaFormatOnly(fecha = "") {
+  const raw = String(fecha ?? "").trim();
+  const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(20\d{2})$/);
+  if (!m) return "";
+  const day = Number(m[1]);
+  const month = Number(m[2]);
+  const year = Number(m[3]);
+  if (day < 1 || day > 31 || month < 1 || month > 12) return "";
+  return `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`;
+}
+
 /**
  * Completa columna "medio" vacía en el Sheet Intrant usando el host/nombre de la URL.
+ * También normaliza formato de fecha (dd/mm/yyyy) sin cambiar el valor del día.
  */
 export async function fillMissingMedioInSheet({
   spreadsheetId,
@@ -195,22 +208,43 @@ export async function fillMissingMedioInSheet({
   });
   const values = full.data.values || [];
   if (values.length <= 1) {
-    return { checked: 0, filled: 0, spreadsheetId: id, sheetName: tab, samples: [] };
+    return {
+      checked: 0,
+      filled: 0,
+      fechaNormalized: 0,
+      spreadsheetId: id,
+      sheetName: tab,
+      samples: [],
+    };
   }
 
   const updates = [];
   const samples = [];
+  let fechaNormalized = 0;
+
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
+    const rowNum = i + 1;
     const medio = String(row[4] || "").trim();
     const url = String(row[6] || "").trim();
+    const fechaRaw = String(row[0] || "").trim();
+
+    // Formato fecha únicamente (4/8/2026 → 04/08/2026). Nunca cambia el día.
+    const fechaPad = padFechaFormatOnly(fechaRaw);
+    if (fechaPad && fechaPad !== fechaRaw) {
+      updates.push({
+        range: `${tab}!A${rowNum}`,
+        values: [[fechaPad]],
+      });
+      fechaNormalized += 1;
+    }
+
     if (!isMissingMedio(medio)) continue;
     if (!/^https?:\/\//i.test(url)) continue;
 
     const fromUrl = guessSourceFromUrl(url);
     if (!fromUrl || isMissingMedio(fromUrl)) continue;
 
-    const rowNum = i + 1;
     updates.push({
       range: `${tab}!E${rowNum}`,
       values: [[fromUrl]],
@@ -229,7 +263,8 @@ export async function fillMissingMedioInSheet({
 
   return {
     checked: values.length - 1,
-    filled: updates.length,
+    filled: updates.filter((u) => /!E\d+$/.test(u.range)).length,
+    fechaNormalized,
     spreadsheetId: id,
     sheetName: tab,
     samples,
@@ -429,16 +464,23 @@ function isLegacyNumberedRow(row = []) {
   return isRowIndex(row[0]);
 }
 
-/** Completa filas antiguas (7 cols) hasta 8, rellenando huecos. */
-function normalizeStoredRow(row = []) {
+/** Completa filas antiguas (7 cols) hasta 8, rellenando huecos.
+ *  Por defecto NO cambia la fecha ya insertada (preserveFecha=true).
+ */
+function normalizeStoredRow(row = [], { preserveFecha = true } = {}) {
   let r = remapLegacyRow(row);
 
   while (r.length < HEADERS.length) r.push("");
   const out = r.slice(0, HEADERS.length);
   const url = String(out[6] || "").trim();
-  out[0] = resolveFechaSheet(out[0], url) || String(out[0] || "").trim();
-  // Histórico sin fecha recuperable: no inventar "hoy"
-  if (!out[0]) out[0] = "sin-fecha";
+  if (preserveFecha) {
+    const raw = String(out[0] || "").trim();
+    out[0] = raw || "sin-fecha";
+  } else {
+    out[0] = resolveFechaSheet(out[0], url) || String(out[0] || "").trim();
+    // Histórico sin fecha recuperable: no inventar "hoy"
+    if (!out[0]) out[0] = "sin-fecha";
+  }
   if (!String(out[1] || "").trim()) out[1] = "Redacción";
   if (!String(out[2] || "").trim()) out[2] = "(sin título)";
   if (!String(out[3] || "").trim() || BAD_TEXTO.test(out[3])) {
@@ -453,9 +495,14 @@ function normalizeStoredRow(row = []) {
   return out;
 }
 
+/** Fecha literal de la celda (sin reescribir desde URL). */
 function rowFecha(row = []) {
   const mapped = remapLegacyRow(row);
-  return normalizeFechaKey(resolveFechaSheet(mapped[0], mapped[6]));
+  return normalizeFechaKey(String(mapped[0] || "").trim());
+}
+
+function rowFechaRaw(row = []) {
+  return String(remapLegacyRow(row)[0] || "").trim();
 }
 
 function rowUrl(row = []) {
@@ -581,6 +628,15 @@ export async function refreshTodaysGoogleAlertRows(alerts, {
 
   const newUrlSet = new Set(alerts.map((a) => a.url).filter(Boolean));
   const previous = values.slice(1);
+
+  // Fechas ya insertadas por URL — nunca se pisan al reinsertar la misma noticia
+  const fechaByUrl = new Map();
+  for (const row of previous) {
+    const u = rowUrl(row);
+    const f = rowFechaRaw(row);
+    if (u && f && !fechaByUrl.has(u)) fechaByUrl.set(u, f);
+  }
+
   const kept = previous.filter((row) => {
     const fecha = rowFecha(row);
     const periodista = rowPeriodista(row);
@@ -599,17 +655,19 @@ export async function refreshTodaysGoogleAlertRows(alerts, {
     return appendAlertsToSheet(alerts, { spreadsheetId: id, sheetName: tab });
   }
 
-  const newRows = alerts.map(alertToIntrantRow);
+  const newRows = alerts.map((a) => {
+    const row = alertToIntrantRow(a);
+    const prevFecha = a.url ? fechaByUrl.get(a.url) : "";
+    // Misma URL ya existía → conservar su fecha insertada
+    if (prevFecha) row[0] = prevFecha;
+    else if (!String(row[0] || "").trim()) row[0] = formatFechaSheet();
+    return row;
+  });
   const next = [
     HEADERS,
-    ...kept.map(normalizeStoredRow),
-    ...newRows.map((row) => {
-      // filas nuevas sí deben tener fecha (hoy si falta)
-      if (!String(row[0] || "").trim()) {
-        return [formatFechaSheet(), ...row.slice(1)];
-      }
-      return row;
-    }),
+    // Histórico: fechas intactas
+    ...kept.map((row) => normalizeStoredRow(row, { preserveFecha: true })),
+    ...newRows,
   ];
 
   await sheets.spreadsheets.values.clear({
@@ -633,7 +691,8 @@ export async function refreshTodaysGoogleAlertRows(alerts, {
 }
 
 /**
- * Repara fechas corruptas (p. ej. 11/06/1901) en todo el sheet, sin re-sincronizar noticias.
+ * Repara SOLO fechas claramente corruptas (índice #, años <2000 tipo 1901).
+ * Nunca cambia una fecha 20xx ya insertada.
  */
 export async function repairSheetFechas({
   spreadsheetId,
@@ -657,10 +716,28 @@ export async function repairSheetFechas({
   const next = [HEADERS];
   for (const row of values.slice(1)) {
     const before = String(row[0] || "").trim();
-    const normalized = normalizeStoredRow(row);
-    const after = String(normalized[0] || "").trim();
-    if (before !== after || isRowIndex(before)) repaired += 1;
-    next.push(normalized);
+    const url = rowUrl(row);
+    const preserved = normalizeStoredRow(row, { preserveFecha: true });
+    const yearMatch = before.match(/^\d{1,2}\/\d{1,2}\/(\d{4})$/);
+    const corrupt =
+      isRowIndex(before) ||
+      (yearMatch && Number(yearMatch[1]) < 2000);
+
+    if (corrupt) {
+      let fechaFixed = resolveFechaSheet(before, url);
+      if (!fechaFixed) {
+        const ymd = extractDateFromUrl(url);
+        if (ymd) {
+          const [y, m, d] = ymd.split("-");
+          fechaFixed = `${d}/${m}/${y}`;
+        }
+      }
+      if (fechaFixed && fechaFixed !== before) {
+        preserved[0] = fechaFixed;
+        repaired += 1;
+      }
+    }
+    next.push(preserved);
   }
 
   await sheets.spreadsheets.values.clear({

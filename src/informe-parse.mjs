@@ -186,24 +186,54 @@ const WEEKDAYS =
 const MONTHS =
   "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre";
 
+/** Nombres cortos conocidos (evita basura de archivo/stream). */
+const MEDIO_ALIASES = [
+  [/telemicro/i, "Telemicro"],
+  [/teleantillas/i, "Teleantillas"],
+  [/color\s*visi[oó]n/i, "Color Visión"],
+  [/digital\s*15/i, "Digital 15"],
+  [/\bcdn\b(?!\s*\d)/i, "CDN"],
+  [/telesistema/i, "Telesistema"],
+  [/antena\s*latina/i, "Antena Latina"],
+  [/certv|canal\s*4\b/i, "CERTV"],
+  [/ritmo\s*96/i, "Ritmo 96"],
+  [/rumba\s*98\.?5|rumba\s*985/i, "Rumba 98.5 FM"],
+  [/z\s*101|z101/i, "Z101"],
+  [/esquina\s*caliente/i, "Esquina Caliente"],
+  [/n\s*digital|ndigital/i, "N Digital"],
+  [/list[ií]n\s*diario/i, "Listín Diario"],
+  [/diario\s*libre/i, "Diario Libre"],
+  [/\bel\s*caribe\b/i, "El Caribe"],
+  [/\bacento\b/i, "Acento"],
+];
+
 /**
- * Limpia el medio: quita códigos de archivo, horarios y fechas del nombre.
- * Devuelve { nombre, fecha, display } → nombre corto + fecha opcional.
- * Ej: "Rumba 985 Fm 720p 07-50-07 Seg003.m4a" → { nombre: "Rumba 98.5 FM" }
+ * Limpia el medio: solo el nombre del canal/emisora (ej. "Telemicro").
+ * Quita fechas, horas, .m4a, 720p, seg###, "del", etc.
  */
 export function cleanMedio(raw = "") {
   let s = spanishMonthsInText(String(raw || ""))
+    .replace(/_/g, " ")
     .replace(/^en\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Alias conocidos → nombre corto fijo
+  for (const [re, name] of MEDIO_ALIASES) {
+    if (re.test(s)) {
+      return { nombre: name, fecha: "", display: name };
+    }
+  }
+
+  s = s
     .replace(/\[[A-Za-z0-9_-]{6,}\]/g, " ")
     .replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ")
     .replace(/\bclip\s*\d+\b/gi, " ")
-    // artefactos de grabación / archivos
     .replace(/\.(m4a|mp3|mp4|wav|aac|mkv|webm)\b/gi, " ")
     .replace(/\bseg\d+\b/gi, " ")
     .replace(/\b\d{3,4}p\b/gi, " ")
     .replace(/\b\d{2}-\d{2}-\d{2}\b/g, " ")
     .replace(/\b(?:rep\.?\s*dom\.?|república\s+dominicana|republica\s+dominicana)\b/gi, " ")
-    .replace(/_/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -225,9 +255,9 @@ export function cleanMedio(raw = "") {
     }
   }
 
-  // "viernes 24 de julio de 2026" / "24 de julio de 2026"
+  // "del 03 de agosto de 2026" / "viernes 24 de julio de 2026"
   const dayMonthYear = new RegExp(
-    `\\b(?:(${WEEKDAYS})\\s+)?(\\d{1,2})\\s+de\\s+(${MONTHS})\\s+(?:de\\s+)?(\\d{4})\\b`,
+    `\\b(?:del\\s+)?(?:(${WEEKDAYS})\\s+)?(\\d{1,2})\\s+de\\s+(${MONTHS})\\s+(?:de\\s+)?(\\d{4})\\b`,
     "i"
   );
   const dmy = s.match(dayMonthYear);
@@ -236,7 +266,6 @@ export function cleanMedio(raw = "") {
     fecha = `${weekday}${dmy[2]} de ${capitalizeWord(dmy[3])} de ${dmy[4]}`;
     s = s.replace(dmy[0], " ").replace(/\s+/g, " ").trim();
   } else {
-    // "Julio 13 - 2026" / "Julio 13 2026"
     const alt = s.match(
       new RegExp(`\\b((?:${MONTHS})\\s+\\d{1,2}\\s*[-–—]?\\s*\\d{4})\\b`, "i")
     );
@@ -255,21 +284,31 @@ export function cleanMedio(raw = "") {
   if (hora && fecha) fecha = `${fecha}, ${hora}`;
   else if (hora && !fecha) fecha = hora;
 
-  // basura residual de títulos de stream
+  // basura residual
   s = s
     .replace(/[()[\]]+/g, " ")
     .replace(/\s*[,;|]+\s*/g, " ")
     .replace(/\s*[-–—]+\s*/g, " ")
+    .replace(/\b\d{4}\b/g, " ") // años sueltos
+    .replace(/\b\d{1,2}\s+\d{1,2}\s+\d{1,2}\b/g, " ") // hh mm ss
     .replace(/\s{2,}/g, " ")
     .trim();
 
-  // frecuencias sin punto: 985 → 98.5, 1077 → 107.7
+  // quitar preposiciones colgantes: "Telemicro del", "Digital 15 a"
+  s = s
+    .replace(/^(?:en|de|del|la|el|a|al|por|para)\s+/i, "")
+    .replace(/\s+(?:en|de|del|la|el|a|al|por|para|am|pm)$/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  // frecuencias sin punto: 985 → 98.5
   s = s.replace(/\b(\d{2,3})(\d)\b/g, (full, a, b) => {
     const n = Number(full);
     if (n >= 880 && n <= 1080) return `${a}.${b}`;
     return full;
   });
 
+  // Solo el nombre del medio (sin fecha/hora en display)
   const nombre = titleCaseMedia(s);
   const display = nombre || "Medio no especificado";
 
@@ -293,11 +332,12 @@ function capitalizePhrase(text = "") {
 function titleCaseMedia(text = "") {
   if (!text) return "";
   const small = new Set(["de", "del", "la", "el", "en", "y", "a"]);
+  const upper = new Set(["fm", "am", "tv", "rd", "cdn", "certv", "nd"]);
   return text
     .split(/\s+/)
     .map((w, i) => {
       if (/^\d+(\.\d+)?$/.test(w)) return w;
-      if (/^(fm|am|tv|rd)$/i.test(w)) return w.toUpperCase();
+      if (upper.has(w.toLowerCase())) return w.toUpperCase();
       if (i > 0 && small.has(w.toLowerCase())) return w.toLowerCase();
       return capitalizeWord(w);
     })
@@ -615,17 +655,133 @@ function matchesClient(item, client) {
   return bodyMatchesClient(item, client);
 }
 
+function normalizeDedupeText(text = "") {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenSet(text = "") {
+  const stop = new Set([
+    "el", "la", "los", "las", "de", "del", "un", "una", "unos", "unas",
+    "y", "o", "en", "a", "al", "por", "para", "con", "se", "su", "sus",
+    "que", "como", "sobre", "sin", "mas", "muy", "es", "son", "fue",
+    "este", "esta", "estos", "estas", "hay", "the", "and", "of",
+    "termino", "mencion", "segmento", "contexto",
+  ]);
+  return new Set(
+    normalizeDedupeText(text)
+      .split(" ")
+      .filter((t) => t.length > 2 && !stop.has(t))
+  );
+}
+
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter += 1;
+  return inter / (a.size + b.size - inter);
+}
+
+/** Texto que define la noticia (contenido), no el clip ni el término. */
+function newsContentText(item) {
+  return [
+    item.tema,
+    item.contexto,
+    item.motivo,
+    item.puntos,
+    item.transcripcionExcerpt,
+    item.transcripcion,
+  ]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function contentFingerprint(item) {
+  const body = normalizeDedupeText(newsContentText(item)).slice(0, 220);
+  return body || normalizeDedupeText(item.tema || item.term || "");
+}
+
+function transcriptText(item) {
+  return normalizeDedupeText(
+    item.transcripcionExcerpt || item.transcripcion || item.puntos || ""
+  );
+}
+
+/**
+ * Misma noticia = mismo contenido (tema/contexto/transcripción).
+ * Un clip puede tener varias noticias distintas → se conservan si el contenido difiere.
+ */
+function itemsAreSameContent(a, b) {
+  const ca = contentFingerprint(a);
+  const cb = contentFingerprint(b);
+  if (!ca || !cb) return false;
+  if (ca === cb) return true;
+
+  if (ca.length >= 40 && cb.length >= 40) {
+    const n = Math.min(80, ca.length, cb.length);
+    if (ca.slice(0, n) === cb.slice(0, n)) return true;
+  }
+
+  // Misma transcripción / evidencia → mismo contenido (aunque el término cambie)
+  const txA = transcriptText(a);
+  const txB = transcriptText(b);
+  if (txA.length >= 50 && txB.length >= 50) {
+    const txSim = jaccard(tokenSet(txA), tokenSet(txB));
+    if (txSim >= 0.55) return true;
+    const probe = Math.min(70, txA.length, txB.length);
+    if (
+      txA.includes(txB.slice(0, probe)) ||
+      txB.includes(txA.slice(0, probe))
+    ) {
+      return true;
+    }
+  }
+
+  const temaSim = jaccard(tokenSet(a.tema), tokenSet(b.tema));
+  const bodySim = jaccard(tokenSet(newsContentText(a)), tokenSet(newsContentText(b)));
+
+  const medioA = normalizeDedupeText(a.medioNombre || a.medio || "");
+  const medioB = normalizeDedupeText(b.medioNombre || b.medio || "");
+  const sameMedio = Boolean(medioA && medioB && medioA === medioB);
+
+  if (sameMedio) {
+    if (temaSim >= 0.4 && bodySim >= 0.35) return true;
+    if (bodySim >= 0.5) return true;
+  }
+
+  if (temaSim >= 0.55 && bodySim >= 0.5) return true;
+  if (bodySim >= 0.65) return true;
+
+  const ta = normalizeDedupeText(a.tema);
+  const tb = normalizeDedupeText(b.tema);
+  if (ta.length >= 25 && tb.length >= 25) {
+    if ((ta.includes(tb) || tb.includes(ta)) && bodySim >= 0.4) return true;
+  }
+
+  return false;
+}
+
+function preferNewsItem(a, b) {
+  const rank = (x) => relevanceRank(x.relevancia);
+  if (rank(a) !== rank(b)) return rank(a) < rank(b) ? a : b;
+  return newsContentText(a).length >= newsContentText(b).length ? a : b;
+}
+
+/** No repetir el mismo contenido; clips con varias noticias distintas se conservan. */
 function dedupeItems(items) {
-  const seen = new Set();
   const out = [];
   for (const item of items) {
-    const key = [
-      item.term,
-      (item.tema || "").slice(0, 80).toLowerCase(),
-      (item.puntos || "").slice(0, 100).toLowerCase(),
-    ].join("|");
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const dupIdx = out.findIndex((prev) => itemsAreSameContent(prev, item));
+    if (dupIdx >= 0) {
+      out[dupIdx] = preferNewsItem(out[dupIdx], item);
+      continue;
+    }
     out.push(item);
   }
   return out;

@@ -1,5 +1,5 @@
 # Tarea cada 3 horas:
-# - Intrant: completa medio vacío desde URL
+# - Intrant: medio vacío desde URL + normalizar formato fecha (sin cambiar el día)
 # - Edesur: medio desde URL, título desde texto, fecha dd/mm/yyyy
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -39,7 +39,7 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -Description "Cada 3h: Intrant medio←URL; Edesur medio←URL, titulo←texto, fecha dd/mm/yyyy" | Out-Null
+    -Description "Cada 3h: Intrant medio←URL + formato fecha (sin cambiar día); Edesur medio/titulo/fecha" | Out-Null
 
 Write-Host "Tarea instalada: $TaskName"
 Write-Host "Frecuencia: cada 3 horas (inicio $start)"

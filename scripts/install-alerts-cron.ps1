@@ -62,6 +62,9 @@ if (`$edesurOn) {
 & `$Node 'scripts/sync-google-alerts.mjs' '--replace' *>> `$LogFile 2>&1
 `$exit1 = `$LASTEXITCODE
 
+& `$Node 'scripts/purge-stale-intrant.mjs' *>> `$LogFile 2>&1
+`$exitPurge = `$LASTEXITCODE
+
 `$exit2 = 0
 if (`$edesurOn) {
     & `$Node 'scripts/sync-electric-alerts.mjs' '--replace' *>> `$LogFile 2>&1
@@ -70,8 +73,11 @@ if (`$edesurOn) {
     Add-Content -Path `$LogFile -Value "Electrico omitido (EDESUR_ENABLED=false)"
 }
 
-`$exit = if (`$exit1 -ne 0) { `$exit1 } elseif (`$exit2 -ne 0) { `$exit2 } else { 0 }
-Add-Content -Path `$LogFile -Value "[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Fin exit=`$exit (intrant=`$exit1 electric=`$exit2)"
+`$exit = 0
+if (`$exit1 -ne 0) { `$exit = `$exit1 }
+elseif (`$exitPurge -ne 0) { `$exit = `$exitPurge }
+elseif (`$exit2 -ne 0) { `$exit = `$exit2 }
+Add-Content -Path `$LogFile -Value "[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Fin exit=`$exit (intrant=`$exit1 purge=`$exitPurge electric=`$exit2)"
 exit `$exit
 "@ | Set-Content -Path $wrapper -Encoding UTF8
 
@@ -102,7 +108,7 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $triggers `
     -Settings $settings `
-    -Description "Google Alerts Gmail → Sheets (Intrant; Edesur si EDESUR_ENABLED!=false) a las $timesRaw" | Out-Null
+    -Description "Google Alerts → Sheets + purge Intrant >24h (verifica URL) a las $timesRaw" | Out-Null
 
 Write-Host "Tarea instalada: $TaskName"
 Write-Host "Horarios: $timesRaw (hora local)"

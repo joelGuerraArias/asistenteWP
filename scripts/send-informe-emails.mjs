@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { Telegraf } from "telegraf";
 import { config } from "../src/config.mjs";
 import {
+  mergeFixedCc,
   prepareClientEmail,
   sendDailyInformeEmails,
   sendEmail,
@@ -217,11 +218,12 @@ async function sendOnlyClient(clientId, { date, to, dryRun, channel }) {
     (clientId === "edesur"
       ? config.informes.emailEdesur
       : config.informes.emailIntrant);
-  const cc = to
+  const rawCc = to
     ? ""
     : clientId === "edesur"
       ? config.informes.emailEdesurCc
       : config.informes.emailIntrantCc;
+  const cc = mergeFixedCc(rawCc);
 
   if (!dest) throw new Error(`Falta destino para ${clientId}`);
 

@@ -1,5 +1,7 @@
 # AsistenteWP — JARVIS para FV Digital
 
+**Versión actual: `1.0.1`** — historial en [CHANGELOG.md](CHANGELOG.md).
+
 Bot de Telegram + asistente WordPress para **fvdigital.do**. Publica noticias desde el móvil (texto, voz, foto, enlace), redacta artículos con IA y se conecta a Cursor vía [mcp-wordpress](https://github.com/docdyhr/mcp-wordpress).
 
 ---
@@ -222,6 +224,7 @@ Busca tu bot (ej. `@AsisWPBot`) y envía mensajes.
 | `/mas deportes` | Añade categoría extra al siguiente post |
 | `/copiar` | Devuelve el post para pegar manualmente |
 | `/escuchar` | Solo transcribe el próximo audio, sin publicar |
+| `/foto` | Video Termómetro: nombre + institución + foto del funcionario |
 | `/voz on` / `/voz off` | Respuestas en audio |
 | `/estado` | Modo, IA, STT, último post |
 | `/ayuda` | Menú de ayuda |
@@ -233,6 +236,15 @@ Busca tu bot (ej. `@AsisWPBot`) y envía mensajes.
 3. Sugiere 3 títulos (o escribes el tuyo)
 4. Pides foto: envías imagen, `buscar`, `sin foto` o `sí`
 5. Redacta y publica en WordPress
+
+### Flujo `/foto` — Termómetro FV Digital
+
+1. Envías `/foto` (opcionalmente `/foto Guido Gómez Mazara`)
+2. El bot pide la institución (ej. `Indotel`)
+3. El bot pide la foto del funcionario
+4. Quita el fondo, recorta la figura y la pega en el frame base
+5. Escribe letra por letra: *"¿Cómo lo ha hecho [nombre] en [institución]?"*
+6. Genera un video 1:1 de **30 segundos** y lo sube a R2 → webhook de redes
 
 ### Categorías
 

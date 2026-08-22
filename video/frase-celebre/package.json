@@ -1,0 +1,11 @@
+﻿{
+  "name": "frase-celebre",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes hyperframes@0.7.17 preview",
+    "check": "npx --yes hyperframes@0.7.17 check",
+    "lint": "npx --yes hyperframes@0.7.17 lint",
+    "render": "npx --yes hyperframes@0.7.17 render"
+  }
+}

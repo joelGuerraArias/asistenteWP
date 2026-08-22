@@ -92,6 +92,7 @@ export const DEFAULT_INTRANT_KEYWORDS = [
   "seguridad vial",
   "milton morrison",
   "miltton morrison",
+  "juan manuel mendez",
   "transporte terrestre",
   "transporte público",
   "transporte publico",
@@ -126,7 +127,7 @@ export function isRelevantIntrantAlert(item, keywords = DEFAULT_INTRANT_KEYWORDS
 
   if (
     /\btransportes?\b/.test(title) &&
-    !/(intrant|digesett|rd\s*vial|rdvial|seguridad vial|morrison|pasaje|licencia|motoconcho|transito|tr[aá]nsito|omnibus|autob|fenatrano|chofer)/i.test(
+    !/(intrant|digesett|rd\s*vial|rdvial|seguridad vial|morrison|mendez|pasaje|licencia|motoconcho|transito|tr[aá]nsito|omnibus|autob|fenatrano|chofer)/i.test(
       title
     )
   ) {

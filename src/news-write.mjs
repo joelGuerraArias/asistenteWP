@@ -56,7 +56,7 @@ export function cleanWriteTopic(topic = "") {
 export function isWriteFlowQuestion(text = "") {
   const t = text.trim();
   if (/^[1-3]$/.test(t)) return false;
-  if (/^(buscar|sin foto|cancelar|sí|si|publicar|ok|dale|no|ninguna|captura|usar captura)$/i.test(t)) return false;
+  if (/^(buscar|sin foto|cancelar|sí|si|publicar|ok|dale|no|ninguna|captura|usar captura|documento|usar documento|original|así|asi)$/i.test(t)) return false;
   if (/\?/.test(t)) return true;
   if (
     /^(pero|tienes|tiene|hay|son|es|qué|que|cómo|como|cuál|cual|dime|explica|muéstrame|muestrame|investiga)/i.test(
@@ -176,6 +176,7 @@ export function emptyWriteFlow() {
     topic: "",
     titles: [],
     selectedTitle: "",
+    originalTitle: "",
     excerpt: "",
     body_html: "",
     imageBuffer: null,

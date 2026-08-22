@@ -10,15 +10,62 @@ function wpUrl(path) {
   return `${config.wp.siteUrl}/wp-json/wp/v2${path}`;
 }
 
-async function wpRequest(path, { method = "GET", body, headers = {} } = {}) {
-  const res = await fetch(wpUrl(path), {
-    method,
-    headers: {
-      ...wpAuthHeader(),
-      ...headers,
-    },
-    body,
-  });
+function summarizeWpError(status, data, rawText = "") {
+  const jsonMsg =
+    typeof data === "object" && data?.message
+      ? String(data.message).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
+      : "";
+  const raw = String(rawText || jsonMsg || "");
+  if (status === 522 || /connection timed out|error code 522/i.test(raw)) {
+    return "WordPress no respondió (Cloudflare 522: timeout). El sitio está lento o caído; reintenta en un minuto.";
+  }
+  if (
+    status === 524 ||
+    status === 504 ||
+    (/timeout/i.test(raw) && /cloudflare/i.test(raw))
+  ) {
+    return `WordPress tardó demasiado (${status}). Reintenta en un minuto.`;
+  }
+  if (status === 502 || status === 503) {
+    return `WordPress no está disponible (${status}). Reintenta en un minuto.`;
+  }
+  if (/<!DOCTYPE html|<html[\s>]/i.test(raw)) {
+    const title = raw.match(/<title>([^<]+)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim();
+    return title
+      ? `WordPress ${status}: ${title.slice(0, 120)}`
+      : `WordPress ${status}: el sitio devolvió una página de error (HTML).`;
+  }
+  const msg = (jsonMsg || raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(
+    0,
+    280
+  );
+  return `WordPress ${status}: ${msg || "error desconocido"}`;
+}
+
+async function wpRequest(path, { method = "GET", body, headers = {}, timeoutMs = 20000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(wpUrl(path), {
+      method,
+      headers: {
+        ...wpAuthHeader(),
+        ...headers,
+      },
+      body,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError" || error?.code === "ABORT_ERR") {
+      throw new Error(
+        "WordPress no respondió (timeout). El sitio está lento o caído; reintenta en un minuto."
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   const text = await res.text();
   let data;
@@ -29,11 +76,7 @@ async function wpRequest(path, { method = "GET", body, headers = {} } = {}) {
   }
 
   if (!res.ok) {
-    const msg =
-      typeof data === "object" && data?.message
-        ? data.message.replace(/<[^>]+>/g, "")
-        : text;
-    throw new Error(`WordPress ${res.status}: ${msg}`);
+    throw new Error(summarizeWpError(res.status, data, text));
   }
 
   return data;
@@ -168,6 +211,7 @@ export async function uploadImageFromBuffer(
       "Content-Disposition": `attachment; filename="${prepared.filename}"`,
     },
     body: prepared.buffer,
+    timeoutMs: 35000,
   });
 
   const ready = await waitForMediaMetadata(media.id);
@@ -184,11 +228,18 @@ function hasTagdivSizes(media) {
   return Object.keys(sizes).some((key) => key.startsWith("td_"));
 }
 
-async function waitForMediaMetadata(mediaId, { attempts = 8, delayMs = 1500 } = {}) {
+async function waitForMediaMetadata(mediaId, { attempts = 3, delayMs = 800 } = {}) {
   let last = null;
 
   for (let i = 0; i < attempts; i += 1) {
-    last = await wpRequest(`/media/${mediaId}?context=edit`);
+    try {
+      last = await wpRequest(`/media/${mediaId}?context=edit`, { timeoutMs: 12000 });
+    } catch (error) {
+      console.warn("waitForMediaMetadata:", error.message);
+      if (i >= attempts - 1) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      continue;
+    }
     const width = last.media_details?.width;
     const height = last.media_details?.height;
 

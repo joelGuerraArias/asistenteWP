@@ -1,6 +1,6 @@
 {
   "name": "asistente-wp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Asistente WordPress para Cursor via mcp-wordpress",
   "type": "module",
@@ -30,11 +30,22 @@
     "intrant:medio": "node scripts/fill-intrant-medio.mjs",
     "intrant:medio:dry": "node scripts/fill-intrant-medio.mjs --dry-run",
     "intrant:medio:install": "powershell -ExecutionPolicy Bypass -File scripts/install-fill-medio-cron.ps1",
+    "intrant:purge": "node scripts/purge-stale-intrant.mjs",
+    "intrant:purge:dry": "node scripts/purge-stale-intrant.mjs --dry-run",
     "electric:maintain": "node scripts/maintain-electric-sheet.mjs",
     "reports:telegram": "node scripts/send-reports-telegram.mjs",
     "video:remotion": "npm --prefix video/remotion run dev",
     "video:hyperframes": "npm --prefix video/hyperframes run dev",
-    "video:hyperframes:render": "npm --prefix video/hyperframes run render"
+    "video:hyperframes:render": "npm --prefix video/hyperframes run render",
+    "dgcp:digest": "node scripts/send-dgcp-digest.mjs",
+    "dgcp:dry": "node scripts/send-dgcp-digest.mjs --dry-run",
+    "dgcp:cron": "node scripts/dgcp-cron.mjs",
+    "dgcp:cron:install": "powershell -ExecutionPolicy Bypass -File scripts/install-dgcp-cron.ps1",
+    "dgcp:cron:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/uninstall-dgcp-cron.ps1",
+    "frase:test": "node scripts/run-frase-celebre.mjs --test",
+    "frase:render": "node scripts/run-frase-celebre.mjs",
+    "frase:cron:install": "powershell -ExecutionPolicy Bypass -File scripts/install-frase-cron.ps1",
+    "frase:cron:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/uninstall-frase-cron.ps1"
   },
   "dependencies": {
     "google-tts-api": "^0.0.6",

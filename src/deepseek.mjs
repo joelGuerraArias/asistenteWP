@@ -128,6 +128,68 @@ ${ocrText}
   };
 }
 
+/**
+ * Redacta una nota / comunicado a partir del texto de un documento (PDF, etc.).
+ */
+export async function buildNoteFromDocument({ docText, userHint = "", fileName = "" }) {
+  const prompt = `Eres redactor de FV Digital. A partir del documento, arma una NOTA / comunicado para WordPress en JSON.
+
+REGLAS:
+- Extrae los hechos del documento (quién, qué, cuándo, dónde, por qué)
+- Titular claro y periodístico en español
+- Cuerpo en HTML simple (<p>, <strong>, <em>)
+- Conserva cifras, nombres, cargos e instituciones del documento
+- No inventes datos que no estén en el texto
+- No digas "según el documento" ni "el PDF indica"
+- Estilo nota informativa / comunicado, listo para publicar
+
+${EDITORIAL_HTML_RULES}
+
+Formato JSON:
+{
+  "title": "titular",
+  "excerpt": "resumen 1-2 líneas",
+  "content_html": "cuerpo HTML",
+  "summary": "2-4 bullets clave del documento (texto plano, uno por línea con • )"
+}
+
+Archivo: ${fileName || "documento"}
+Indicaciones: ${userHint || "ninguna"}
+
+Documento:
+---
+${String(docText || "").slice(0, 12000)}
+---`;
+
+  const { content } = await deepseekChat(
+    [{ role: "user", content: prompt }],
+    { json: true }
+  );
+
+  let draft = parseModelJson(content);
+  if (!draft) {
+    draft = {
+      title: extractOriginalTitle(docText, "Nota"),
+      excerpt: "",
+      content_html: `<p>${escapeHtml(String(docText || "").slice(0, 2000))}</p>`,
+      summary: "",
+    };
+  }
+
+  const title = await translateToSpanish(
+    String(draft.title || extractOriginalTitle(docText, "Nota")).trim(),
+    { context: "titular de nota" }
+  );
+  const fields = coerceArticleFields(draft.content_html || content);
+
+  return {
+    title,
+    excerpt: String(draft.excerpt || fields.excerpt || "").replace(/^["']|["']$/g, ""),
+    body_html: fields.content_html,
+    summary: String(draft.summary || "").trim(),
+  };
+}
+
 const EDITORIAL_HTML_RULES = `FORMATO EDITORIAL FV DIGITAL:
 - TODO el contenido debe estar en español (traduce si viene en otro idioma)
 - Párrafos en <p>, elegantes y legibles (2-4 oraciones cada uno)
@@ -135,6 +197,36 @@ const EDITORIAL_HTML_RULES = `FORMATO EDITORIAL FV DIGITAL:
 - Comillas normales (" "), guiones largos (—), texto limpio sin entidades HTML (&amp; #8211; etc.)
 - NO metadatos de agencia (EFE, AP, ARCHIVO, LD, Listín Diario, fechas sueltas de publicación)
 - NO menciones al medio de origen ni fuentes externas en el cuerpo`;
+
+/**
+ * Corrige SOLO ortografía, tildes y puntuación de un titular.
+ * Nunca cambia el sentido, el enfoque ni las palabras clave.
+ */
+export async function correctHeadlineSpelling(title = "") {
+  const input = String(title || "").trim();
+  if (!input) return input;
+
+  const prompt = `Corrige SOLO ortografía, tildes, mayúsculas y puntuación de este titular periodístico.
+
+REGLAS ESTRICTAS:
+- NO cambies el sentido ni la esencia
+- NO añadas ni quites información
+- NO reescribas, no sinónimos, no otro enfoque
+- Conserva nombres propios, siglas, cifras y el orden de las ideas
+- Si ya está correcto, devuélvelo igual
+- Devuelve SOLO el titular corregido, sin comillas ni explicación
+
+Titular:
+${input}`;
+
+  const { content } = await deepseekChat(
+    [{ role: "user", content: prompt }],
+    { temperature: 0.1 }
+  );
+
+  const out = content.trim().replace(/^["']|["']$/g, "");
+  return out || input;
+}
 
 export async function translateToSpanish(text, { context = "texto" } = {}) {
   const input = (text || "").trim();

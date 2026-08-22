@@ -5,6 +5,9 @@ video/**/node_modules/
 video/**/out/
 video/**/.hyperframes/
 video/**/renders/
+video/**/snapshots/
+test-*.png
+test-*.mp4
 *.log
 .bot.pid
 .last-chat.json

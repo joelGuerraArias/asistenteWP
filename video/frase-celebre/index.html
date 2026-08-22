@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1280, height=720" />
+    <title>Frase celebre</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1280px;
+        height: 720px;
+        overflow: hidden;
+        background: #0a3d8f;
+      }
+      #root {
+        position: relative;
+        width: 1280px;
+        height: 720px;
+        overflow: hidden;
+      }
+      #bg {
+        position: absolute;
+        inset: 0;
+        width: 1280px;
+        height: 720px;
+        object-fit: cover;
+        display: block;
+      }
+      #copy {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 168px 96px 72px;
+        text-align: center;
+      }
+      #quote {
+        max-width: 1040px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 48px;
+        font-weight: 400;
+        line-height: 1.28;
+        color: #fff;
+        text-shadow: 0 2px 18px rgba(8, 36, 90, 0.45);
+      }
+      #quote .ch { display: inline; }
+      #author {
+        display: block;
+        max-width: 920px;
+        margin-top: 32px;
+        font-family: "Segoe UI", Inter, system-ui, sans-serif;
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        color: rgba(255, 255, 255, 0.92);
+        text-shadow: 0 2px 12px rgba(8, 36, 90, 0.4);
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="30"
+      data-width="1280"
+      data-height="720"
+    >
+      <img
+        id="bg"
+        class="clip"
+        data-start="0"
+        data-duration="30"
+        data-track-index="0"
+        src="assets/fondo.png"
+        alt=""
+      />
+      <div
+        id="copy"
+        class="clip"
+        data-start="0"
+        data-duration="30"
+        data-track-index="1"
+      >
+        <blockquote id="quote" data-text="“Quien no conoce su historia está condenado a repetirla.”"></blockquote>
+        <p id="author">— Jorge Santayana</p>
+      </div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const quoteEl = document.getElementById("quote");
+      const text = quoteEl.getAttribute("data-text") || "";
+      quoteEl.textContent = "";
+      for (const ch of text) {
+        const span = document.createElement("span");
+        span.className = "ch";
+        span.textContent = ch === " " ? "\u00A0" : ch;
+        quoteEl.appendChild(span);
+      }
+      const chars = quoteEl.querySelectorAll(".ch");
+      const typewriter = 4;
+      const charDur = 0.05;
+      const stagger = chars.length > 1 ? (typewriter - charDur) / (chars.length - 1) : 0;
+      const tl = gsap.timeline({ paused: true });
+      if (chars.length) {
+        tl.fromTo(
+          chars,
+          { opacity: 0 },
+          { opacity: 1, duration: charDur, stagger: stagger, ease: "none" },
+          0
+        );
+      }
+      tl.fromTo(
+        "#author",
+        { opacity: 0, y: 16 },
+        { opacity: 1, y: 0, duration: 0.6, ease: "power2.out" },
+        4.1
+      );
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

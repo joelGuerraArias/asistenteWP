@@ -8,6 +8,8 @@
 import { config } from "../src/config.mjs";
 import { fetchGoogleAlertsForSheet } from "../src/gmail-alerts.mjs";
 import { replaceAlertsSheet } from "../src/sheets-alerts.mjs";
+import { purgeStaleIntrantDayRows } from "../src/purge-stale-intrant.mjs";
+import { notifyIntrantAlertsTelegram } from "./sync-google-alerts.mjs";
 
 const times = config.googleAlerts?.cronTimes?.length
   ? config.googleAlerts.cronTimes
@@ -45,8 +47,26 @@ async function runOnce() {
     console.log(
       `Intrant hoy ${result.added} | ruido ${result.removedTodayNoise} | historico ${result.keptHistorical}`
     );
+    if (alerts.length) {
+      try {
+        await notifyIntrantAlertsTelegram(alerts, result.spreadsheetId);
+      } catch (error) {
+        console.warn(`Telegram Intrant: ${error.message}`);
+      }
+    } else {
+      console.log("Sin alertas Intrant — no Telegram.");
+    }
   } catch (error) {
     console.error(`Intrant: ${error.message}`);
+  }
+
+  try {
+    const purge = await purgeStaleIntrantDayRows({ dryRun: false, notify: true });
+    console.log(
+      `Purge Intrant >24h: revisadas ${purge.checked} | borradas ${purge.deleted} | fallos ${purge.failed}`
+    );
+  } catch (error) {
+    console.error(`Purge Intrant: ${error.message}`);
   }
 
   if (!edesurOn) {

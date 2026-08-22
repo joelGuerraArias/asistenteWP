@@ -112,6 +112,91 @@ export async function ocrImage(buffer, mimeType = "image/jpeg") {
   }
 }
 
+function decodeOcrImageBase64(raw = "") {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const dataUrl = s.match(/^data:([^;]+);base64,(.+)$/i);
+  const b64 = dataUrl ? dataUrl[2] : s.replace(/\s+/g, "");
+  const mime = dataUrl ? dataUrl[1] : "image/jpeg";
+  try {
+    const buf = Buffer.from(b64, "base64");
+    if (buf.length < 80) return null;
+    return { buffer: buf, mimeType: mime.startsWith("image/") ? mime : "image/jpeg" };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * OCR de documento (PDF o imagen). También intenta sacar fotos embebidas.
+ * @returns {{ text: string, images: Array<{ buffer: Buffer, mimeType: string }> }}
+ */
+export async function ocrDocument(buffer, mimeType = "application/pdf") {
+  if (!config.audio.mistralApiKey) {
+    throw new Error("Configura MISTRAL_API_KEY en .env");
+  }
+
+  const mime = String(mimeType || "").toLowerCase();
+  const isImage = mime.startsWith("image/");
+
+  if (isImage) {
+    const text = await ocrImage(buffer, mime);
+    return {
+      text,
+      images: [{ buffer, mimeType: mime }],
+    };
+  }
+
+  if (!mime.includes("pdf") && mime !== "application/octet-stream") {
+    throw new Error(
+      "Formato no soportado. Envía un PDF o una foto/imagen del documento."
+    );
+  }
+
+  const res = await fetchWithRetry(
+    "https://api.mistral.ai/v1/ocr",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.audio.mistralApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: config.vision.ocrModel,
+        document: {
+          type: "document_url",
+          document_url: toDataUrl(buffer, "application/pdf"),
+        },
+        include_image_base64: true,
+      }),
+    },
+    { label: "Mistral OCR documento", retries: 3, delayMs: 1500 }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.message || data?.error?.message || `Mistral OCR ${res.status}`);
+  }
+
+  const pages = data.pages || [];
+  const text = pages
+    .map((p) => p.markdown || "")
+    .join("\n\n")
+    .trim();
+
+  if (!text) throw new Error("OCR no encontró texto en el documento");
+
+  const images = [];
+  for (const page of pages) {
+    for (const img of page.images || []) {
+      const decoded = decodeOcrImageBase64(img.image_base64 || img.imageBase64 || "");
+      if (decoded) images.push(decoded);
+    }
+  }
+
+  return { text, images };
+}
+
 export async function detectCropBox(buffer, mimeType = "image/jpeg", hint = "") {
   const { buffer: prepared, mimeType: preparedMime } = await prepareImageForOcr(buffer);
 
