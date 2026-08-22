@@ -1,24 +1,71 @@
 import { config } from "./config.mjs";
 
-// Estados de gateway que indican que n8n recibió la petición pero tardó en
-// responder (procesa en segundo plano). Se tratan como "encolado", no error.
 const QUEUED_GATEWAY_STATUS = new Set([202, 408, 502, 503, 504, 520, 522, 524]);
 const WEBHOOK_TIMEOUT_MS = 20000;
 
+const F1_CHOICE_HOST =
+  /(?:youtube\.com|youtu\.be|youtube-nocookie\.com|instagram\.com|instagr\.am|facebook\.com|fb\.watch|\bfb\.com|dailymotion\.com|\bdai\.ly)$/i;
+
+export function isF1ChoiceUrl(url = "") {
+  try {
+    const host = new URL(url).hostname.replace(/^(www|m|mobile|web)\./i, "");
+    return F1_CHOICE_HOST.test(host);
+  } catch {
+    return /youtube\.com|youtu\.be|instagram\.com|facebook\.com|fb\.watch|dailymotion\.com|\bdai\.ly/i.test(
+      String(url)
+    );
+  }
+}
+
+export function webhookTargets(dest = "fvdigital") {
+  if (dest === "both") return ["fvdigital", "f1rd"];
+  if (dest === "f1rd") return ["f1rd"];
+  return ["fvdigital"];
+}
+
+export function destIncludesFv(dest = "fvdigital") {
+  return dest !== "f1rd";
+}
+
+export function destLabel(dest = "fvdigital") {
+  if (dest === "both") return "FV Digital + F1RD";
+  if (dest === "f1rd") return "F1RD";
+  return "FV Digital";
+}
+
+function targetConfig(target = "fvdigital") {
+  if (target === "f1rd") {
+    const cfg = config.f1rdWebhook || {};
+    return {
+      url: cfg.url || "https://meny.app.n8n.cloud/webhook/formula1rd",
+      hashtag: cfg.hashtag || "#f1rd",
+      source: cfg.source || config.publishWebhook?.source || "asistente-wp",
+      enabled: cfg.enabled !== false && Boolean(cfg.url || true),
+    };
+  }
+  const cfg = config.publishWebhook || {};
+  return {
+    url: cfg.url,
+    hashtag: cfg.hashtag || "#fvdigital",
+    source: cfg.source || "asistente-wp",
+    enabled: cfg.enabled !== false && Boolean(cfg.url),
+  };
+}
+
+export function captionForTarget(text = "", target = "fvdigital") {
+  const tag = targetConfig(target).hashtag;
+  let base = String(text || "")
+    .replace(/#fvdigital(?:\.do)?/gi, "")
+    .replace(/#f1rd|#formula1rd/gi, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+  if (!base) return tag;
+  return base.includes(tag) ? base : `${base}\n\n${tag}`.trim();
+}
+
 /**
- * Envía un post al webhook de publicación (n8n).
- * El webhook exige que el texto contenga el hashtag configurado (#fvdigital).
- *
- * Para videos: `videoUrl` debe ser la URL pública del bucket R2
- * (R2_PUBLIC_BASE_URL / r2.dev), no el endpoint API cloudflarestorage.com.
- *
  * @param {object} params
- * @param {string} params.title       Texto/título del post.
- * @param {string} [params.imageUrl]  URL pública de la imagen.
- * @param {string} [params.videoUrl]  URL pública R2 del video.
- * @param {string} [params.r2Key]     Key del objeto en el bucket (opcional).
- * @param {string} [params.mediaType] VIDEO | IMAGE | REEL | PHOTO ...
- * @returns {Promise<{ok: boolean, status?: number, body?: any, error?: string}>}
+ * @param {"fvdigital"|"f1rd"} [params.target]
  */
 export async function publishToWebhook({
   caption = "",
@@ -27,24 +74,25 @@ export async function publishToWebhook({
   videoUrl = null,
   r2Key = null,
   mediaType = null,
+  target = "fvdigital",
 } = {}) {
-  const cfg = config.publishWebhook;
-  if (!cfg?.enabled) return { ok: false, error: "webhook deshabilitado" };
-  if (!cfg.url) return { ok: false, error: "falta PUBLISH_WEBHOOK_URL" };
+  const cfg = targetConfig(target);
+  if (!cfg.enabled) return { ok: false, error: "webhook deshabilitado", target };
+  if (!cfg.url) return { ok: false, error: "falta URL de webhook", target };
   if (!imageUrl && !videoUrl) {
-    return { ok: false, error: "falta imageUrl o videoUrl" };
+    return { ok: false, error: "falta imageUrl o videoUrl", target };
   }
 
   if (videoUrl && /cloudflarestorage\.com/i.test(videoUrl)) {
     return {
       ok: false,
+      target,
       error:
         "videoUrl es el endpoint API de R2 (cloudflarestorage.com). Usa la URL pública r2.dev.",
     };
   }
 
-  const hashtag = cfg.hashtag || "#fvdigital";
-  // Prioriza el caption generado; si no hay, usa el título.
+  const hashtag = cfg.hashtag;
   const baseText = (caption || title || "").trim();
   const finalCaption = baseText.includes(hashtag)
     ? baseText
@@ -54,6 +102,7 @@ export async function publishToWebhook({
     caption: finalCaption,
     title: (title || "").trim() || finalCaption,
     source: cfg.source || "asistente-wp",
+    brand: target,
   };
 
   if (videoUrl) {
@@ -67,7 +116,6 @@ export async function publishToWebhook({
     payload.mediaType = mediaType || "IMAGE";
   }
 
-  // Sin reintentos: n8n procesa cada POST, reintentar duplicaría la publicación.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
 
@@ -87,22 +135,49 @@ export async function publishToWebhook({
     }
 
     if (res.ok) {
-      return { ok: true, status: res.status, body };
+      return { ok: true, status: res.status, body, target, caption: finalCaption };
     }
 
-    // Timeout de gateway (Cloudflare 524, etc.): n8n lo está procesando.
     if (QUEUED_GATEWAY_STATUS.has(res.status)) {
-      return { ok: true, queued: true, status: res.status, body };
+      return {
+        ok: true,
+        queued: true,
+        status: res.status,
+        body,
+        target,
+        caption: finalCaption,
+      };
     }
 
-    return { ok: false, status: res.status, body };
+    return { ok: false, status: res.status, body, target };
   } catch (error) {
-    // Nuestro propio timeout: la petición salió; n8n sigue procesando.
     if (error.name === "AbortError") {
-      return { ok: true, queued: true, error: "timeout local (n8n procesando)" };
+      return {
+        ok: true,
+        queued: true,
+        error: "timeout local (n8n procesando)",
+        target,
+        caption: finalCaption,
+      };
     }
-    return { ok: false, error: error.message };
+    return { ok: false, error: error.message, target };
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function publishToDestinations(dest, payload) {
+  const targets = webhookTargets(dest);
+  const results = [];
+  for (const target of targets) {
+    const caption = captionForTarget(payload.caption || payload.title || "", target);
+    results.push(
+      await publishToWebhook({
+        ...payload,
+        caption,
+        target,
+      })
+    );
+  }
+  return results;
 }

@@ -1,6 +1,6 @@
 {
   "name": "asistente-wp",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "private": true,
   "description": "Asistente WordPress para Cursor via mcp-wordpress",
   "type": "module",

@@ -1,6 +1,6 @@
 # AsistenteWP — JARVIS para FV Digital
 
-**Versión actual: `1.0.1`** — historial en [CHANGELOG.md](CHANGELOG.md).
+**Versión actual: `2.0.0`** — historial en [CHANGELOG.md](CHANGELOG.md).
 
 Bot de Telegram + asistente WordPress para **fvdigital.do**. Publica noticias desde el móvil (texto, voz, foto, enlace), redacta artículos con IA y se conecta a Cursor vía [mcp-wordpress](https://github.com/docdyhr/mcp-wordpress).
 
@@ -198,7 +198,9 @@ Busca tu bot (ej. `@AsisWPBot`) y envía mensajes.
 
 | Entrada | Qué hace |
 |---------|----------|
-| **Enlace de noticia** | Extrae título, foto y texto → traduce a español → publica en WP |
+| **Enlace YT / IG / FB / Dailymotion** | Primero pregunta destino: **FV Digital**, **F1RD** o **Ambos**; luego Video o Noticia |
+| **Enlace de periódico** | Solo FV Digital (WordPress + redes FV) |
+| **X / Twitter** | Video o Noticia, sin pregunta F1RD |
 | **Foto + texto** | Crea post con imagen destacada |
 | **Texto largo** (noticia) | Publica tras unos segundos de espera |
 | **Nota de voz** | Transcribe y actúa como texto |

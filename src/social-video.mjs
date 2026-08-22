@@ -12,6 +12,7 @@ const PLATFORM_RE = {
   youtube: /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/i,
   instagram: /(?:instagram\.com|instagr\.am)/i,
   facebook: /(?:facebook\.com|fb\.watch|fb\.com)/i,
+  dailymotion: /(?:dailymotion\.com|\bdai\.ly\b)/i,
   x: /(?:\bx\.com\/|twitter\.com)/i,
 };
 
@@ -33,6 +34,7 @@ export function socialVideoPlatformLabel(platform) {
       youtube: "YouTube",
       instagram: "Instagram",
       facebook: "Facebook",
+      dailymotion: "Dailymotion",
       x: "X",
     }[platform] || platform || "Desconocido"
   );

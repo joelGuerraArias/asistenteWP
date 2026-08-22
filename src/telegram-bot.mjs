@@ -15,7 +15,7 @@ import {
 } from "./audio.mjs";
 import { askDeepseek, buildNewsPostFromOcr, buildNoteFromDocument, composeCardHeadline, correctHeadlineSpelling, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
 import { generateNewsCard, fetchImageBuffer } from "./social-card.mjs";
-import { publishToWebhook } from "./publish-webhook.mjs";
+import { publishToDestinations, isF1ChoiceUrl, destIncludesFv, destLabel } from "./publish-webhook.mjs";
 import { isPublicR2Url, uploadToR2 } from "./r2.mjs";
 import { extractFirstUrl, extractUrlFromMessage, fetchArticleFromUrl, detectSocialPlatform, socialPlatformLabel } from "./news-fetch.mjs";
 import {
@@ -135,6 +135,8 @@ function getSession(chatId) {
       lastVideo: null,
       pendingSocialVideo: null,
       pendingLinkChoice: null,
+      pendingDestChoice: null,
+      publishDest: "fvdigital",
       pendingTradJob: null,
       termometroFlow: null,
     });
@@ -161,7 +163,7 @@ function helpText() {
     "",
     "Publicación directa:",
     "• Enlace de noticia → titular, foto y texto a WP",
-    "• Enlace YT/IG/FB/X → eliges Video o Noticia (imagen)",
+    "• Enlace YT/IG/FB/Dailymotion → destino (FV / F1RD / ambos), luego Video o Noticia",
     "• /escribir — redactar noticia (elige entre 3 titulares)",
     "• /periodista — tu titular (solo corrige ortografía) → tema → foto → WP + redes",
     "• /wp — artículo guiado: tema → borrador → foto → publicar",
@@ -174,8 +176,8 @@ function helpText() {
     "/ia — modo conversación (opcional)",
     "",
     "Video:",
-    "• /video URL — descargar (YT/IG/FB/X) → R2 → webhook (con confirmación); también basta pegar el enlace y elegir Video",
-    "• /trad URL — si no es ES: doblaje pabmatos; si ya es ES: solo overlay → 9:16 → webhook",
+    "• /video URL — destino FV/F1RD/ambos si aplica, luego descarga → R2 → webhook",
+    "• /trad URL — destino si aplica; si no es ES: doblaje; si ya es ES: overlay 9:16 → webhook",
     "• /foto — video Termómetro: nombre + institución + foto del funcionario",
     "• /hyper — diálogo guiado HyperFrames (generar o verificar)",
     "«genera un video con heygen» · /heygen /remotion · /videostatus",
@@ -404,7 +406,7 @@ async function sendSocialCard(ctx, { title, imageBuffer = null, imageUrl = null,
     });
 
     await ctx.replyWithPhoto(Input.fromBuffer(card, "fv-card.png"), {
-      caption: "🖼️ Gráfico para redes (FV Digital)",
+      caption: `Gráfico para redes (${destLabel(session.publishDest || "fvdigital")})`,
     });
 
     await sendCardToWebhook(ctx, { card, title, bodyText });
@@ -428,7 +430,11 @@ async function uploadCardPublicUrl(card, title) {
 }
 
 async function sendCardToWebhook(ctx, { card, title, bodyText = "" }) {
-  if (!config.publishWebhook?.enabled) return;
+  const session = getSession(ctx.chat.id);
+  const dest = session.publishDest || "fvdigital";
+  if (destIncludesFv(dest) && !config.publishWebhook?.enabled) {
+    if (dest === "fvdigital") return;
+  }
 
   try {
     const publicUrl = await uploadCardPublicUrl(card, title);
@@ -437,37 +443,40 @@ async function sendCardToWebhook(ctx, { card, title, bodyText = "" }) {
       return;
     }
 
-    const hashtag = config.publishWebhook.hashtag || "#fvdigital";
-    const caption = await generateSocialCaption(title, bodyText, { hashtag }).catch(
-      () => `${title} ${hashtag}`.trim()
-    );
+    const seedTag =
+      dest === "f1rd"
+        ? config.f1rdWebhook?.hashtag || "#f1rd"
+        : config.publishWebhook.hashtag || "#fvdigital";
+    const captionSeed = await generateSocialCaption(title, bodyText, {
+      hashtag: seedTag,
+    }).catch(() => `${title} ${seedTag}`.trim());
 
-    const session = getSession(ctx.chat.id);
+    const results = await publishToDestinations(dest, {
+      caption: captionSeed,
+      title,
+      imageUrl: publicUrl,
+      mediaType: "IMAGE",
+    });
+    const caption = results.find((r) => r.caption)?.caption || captionSeed;
     session.lastVideo = {
       title,
       caption,
       at: new Date().toISOString(),
     };
 
-    const result = await publishToWebhook({
-      caption,
-      title,
-      imageUrl: publicUrl,
-      mediaType: "IMAGE",
-    });
-
-    if (result.ok) {
-      const note = result.queued
-        ? "📤 Enviado a la cola de redes (n8n está procesando)."
-        : "📤 Enviado a la cola de redes (webhook).";
-      await ctx.reply(`${note}\n\n📝 ${caption}`);
-
-      if (publicUrl) {
-        session.lastVideo.imageUrl = publicUrl;
-      }
-    } else {
+    const failed = results.filter((r) => !r.ok);
+    const ok = results.filter((r) => r.ok);
+    if (ok.length) {
+      const queued = ok.some((r) => r.queued);
+      const note = queued
+        ? `Encolado en n8n (${destLabel(dest)}).`
+        : `Enviado a ${destLabel(dest)}.`;
+      await ctx.reply(`${note}\n\n${caption}`);
+      session.lastVideo.imageUrl = publicUrl;
+    }
+    if (failed.length) {
       await ctx.reply(
-        `⚠️ No pude enviar al webhook: ${result.error || `HTTP ${result.status}`}`
+        `No pude enviar a: ${failed.map((f) => f.target || "?").join(", ")} — ${failed[0].error || failed[0].status}`
       );
     }
   } catch (error) {
@@ -480,6 +489,64 @@ async function handleVideoStatus(ctx) {
   await status(ctx, "🎬 Revisando herramientas de video...");
   const st = await getVideoToolsStatus();
   await reply(ctx, formatVideoToolsStatus(st), { voice: false });
+}
+
+function destChoiceKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("FV Digital", "dest:fvdigital"),
+      Markup.button.callback("F1RD", "dest:f1rd"),
+    ],
+    [
+      Markup.button.callback("Ambos", "dest:both"),
+      Markup.button.callback("❌ Cancelar", "dest:cancel"),
+    ],
+  ]);
+}
+
+async function askPublishDest(ctx, { url, extraCategories = [], resume = "link" } = {}) {
+  const session = getSession(ctx.chat.id);
+  session.pendingDestChoice = { url, extraCategories, resume };
+  await ctx.reply(
+    [
+      "¿A dónde va este enlace?",
+      "• FV Digital — WordPress + redes FV",
+      "• F1RD — solo redes Formula1RD (sin WordPress)",
+      "• Ambos — WordPress FV y los dos webhooks",
+    ].join("\n"),
+    { ...destChoiceKeyboard(), disable_web_page_preview: true }
+  );
+}
+
+/** true si preguntó destino (IG/FB/YT/Dailymotion). */
+async function maybeAskPublishDest(ctx, url, extraCategories = [], resume = "link") {
+  if (!url || !isF1ChoiceUrl(url)) {
+    getSession(ctx.chat.id).publishDest = "fvdigital";
+    return false;
+  }
+  await askPublishDest(ctx, { url, extraCategories, resume });
+  return true;
+}
+
+async function resumeAfterPublishDest(ctx, dest, pending) {
+  const session = getSession(ctx.chat.id);
+  session.publishDest = dest;
+  session.pendingDestChoice = null;
+  const url = pending.url;
+  const extra = pending.extraCategories || [];
+  const resume = pending.resume || "link";
+  await ctx.reply(`Destino: ${destLabel(dest)}. Sigo la ruta normal.`, {
+    disable_web_page_preview: true,
+  });
+  if (resume === "video") {
+    await processSocialVideoUrl(ctx, url);
+    return;
+  }
+  if (resume === "trad") {
+    await processTradVideoUrl(ctx, url);
+    return;
+  }
+  await askSocialLinkChoice(ctx, url, extra);
 }
 
 function socialLinkChoiceKeyboard() {
@@ -792,27 +859,33 @@ async function sendPendingSocialVideoToWebhook(ctx) {
     );
   }
 
-  const caption = ensureCaptionHashtag(pending.caption);
-  const result = await publishToWebhook({
-    caption,
-    title: pending.title || caption,
+  const dest = session.publishDest || "fvdigital";
+  const results = await publishToDestinations(dest, {
+    caption: pending.caption,
+    title: pending.title || pending.caption,
     videoUrl: pending.videoUrl,
     r2Key: pending.r2Key || null,
     mediaType: "VIDEO",
   });
 
   session.pendingSocialVideo = null;
-
-  if (result.ok) {
-    const note = result.queued
-      ? "📤 Video (R2) encolado en n8n (procesando)."
-      : "📤 Video enviado al webhook con URL R2.";
+  const caption = results.find((r) => r.caption)?.caption || pending.caption;
+  const failed = results.filter((r) => !r.ok);
+  const ok = results.filter((r) => r.ok);
+  if (!ok.length) {
+    throw new Error(failed[0]?.error || `HTTP ${failed[0]?.status}`);
+  }
+  const queued = ok.some((r) => r.queued);
+  const note = queued
+    ? `Video (R2) encolado en n8n (${destLabel(dest)}).`
+    : `Video enviado a ${destLabel(dest)}.`;
+  await ctx.reply(`${note}\n\n${pending.videoUrl}\n\n${caption}`, {
+    disable_web_page_preview: true,
+  });
+  if (failed.length) {
     await ctx.reply(
-      `${note}\n\n🔗 ${pending.videoUrl}\n\n📝 ${caption}`,
-      { disable_web_page_preview: true }
+      `Falló: ${failed.map((f) => f.target).join(", ")} — ${failed[0].error || failed[0].status}`
     );
-  } else {
-    throw new Error(result.error || `HTTP ${result.status}`);
   }
 }
 
@@ -1153,6 +1226,7 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
           body_html: html,
           imageUrl: article.imageUrl || null,
           extraCategorySlugs,
+          sourceUrl: url,
         };
 
         await ctx.reply(
@@ -1169,7 +1243,9 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
       }
 
       let featuredMediaId = 0;
-      if (article.imageUrl) {
+      const dest = getSession(ctx.chat.id).publishDest || "fvdigital";
+      const doWp = destIncludesFv(dest);
+      if (doWp && article.imageUrl) {
         await status(ctx, "3/4 🖼️ Subiendo imagen destacada...");
         try {
           const media = await uploadImageFromUrl(
@@ -1186,9 +1262,16 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
         await status(ctx, "3/4 ℹ️ Continúo sin imagen destacada.");
       }
 
-      await status(ctx, "4/4 📤 Subiendo a WordPress...");
       const postStatus = config.autoPublishUrls ? "publish" : config.defaultPostStatus;
       let wpError = null;
+      if (!doWp) {
+        await reply(
+          ctx,
+          "F1RD: no publico en WordPress. Sigo con redes.",
+          { voice: false }
+        );
+      } else {
+      await status(ctx, "4/4 📤 Subiendo a WordPress...");
       try {
         const result = await createPost({
           title: spanishTitle,
@@ -1228,6 +1311,7 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
           `⚠️ WordPress: ${error.message}\nSigo enviando a redes.`,
           { voice: false }
         );
+      }
       }
 
       await status(ctx, "📤 Enviando gráfico a redes...");
@@ -1940,8 +2024,10 @@ async function publishWrittenNews(ctx) {
       }
 
       let featuredMediaId = 0;
+      const dest = session.publishDest || "fvdigital";
+      const doWp = destIncludesFv(dest);
 
-      if (wf.imageBuffer) {
+      if (doWp && wf.imageBuffer) {
         await status(
           ctx,
           wf.source === "ocr" ||
@@ -1962,7 +2048,7 @@ async function publishWrittenNews(ctx) {
           console.warn("Imagen destacada WP:", error.message);
           await status(ctx, `⚠️ WordPress no recibió la imagen: ${error.message}`);
         }
-      } else if (wf.imageUrl) {
+      } else if (doWp && wf.imageUrl) {
         await status(
           ctx,
           wf.source === "ocr" ||
@@ -1991,6 +2077,15 @@ async function publishWrittenNews(ctx) {
         );
       }
 
+      html = coerceArticleHtml(html);
+      let wpError = null;
+      if (!doWp) {
+        await reply(
+          ctx,
+          "F1RD: no publico en WordPress. Sigo con redes.",
+          { voice: false }
+        );
+      } else {
       await status(
         ctx,
         wf.source === "ocr" ||
@@ -2001,8 +2096,6 @@ async function publishWrittenNews(ctx) {
           : "4/4 📤 Subiendo a WordPress..."
       );
       const postStatus = config.autoPublishUrls ? "publish" : config.defaultPostStatus;
-      html = coerceArticleHtml(html);
-      let wpError = null;
       try {
         const result = await createPost({
           title: spanishTitle,
@@ -2040,6 +2133,7 @@ async function publishWrittenNews(ctx) {
           `⚠️ WordPress: ${error.message}\nSigo enviando a redes.`,
           { voice: false }
         );
+      }
       }
 
       const cardImageBuffer = wf.imageBuffer || wf.captureBuffer || null;
@@ -2582,6 +2676,9 @@ async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
 
     const url = extractFirstUrl(trimmed);
     if (url) {
+      if (await maybeAskPublishDest(ctx, url, parseExtraCategories(trimmed), "link")) {
+        return;
+      }
       if (await maybeAskSocialLinkChoice(ctx, url, parseExtraCategories(trimmed))) {
         return;
       }
@@ -2974,11 +3071,12 @@ export async function startBot() {
         session.pendingSocialVideo = { step: "await_url", kind: "video" };
         await reply(
           ctx,
-          "Envía el enlace del video (YouTube, Instagram, Facebook o X).",
+          "Envía el enlace del video (YouTube, Instagram, Facebook, Dailymotion o X).",
           { voice: false }
         );
         return;
       }
+      if (await maybeAskPublishDest(ctx, url, [], "video")) return;
       await processSocialVideoUrl(ctx, url);
     } catch (error) {
       console.error("/video:", error);
@@ -3004,6 +3102,7 @@ export async function startBot() {
         );
         return;
       }
+      if (await maybeAskPublishDest(ctx, url, [], "trad")) return;
       await processTradVideoUrl(ctx, url);
     } catch (error) {
       console.error("/trad:", error);
@@ -3248,6 +3347,12 @@ export async function startBot() {
     if (session.pendingSocialVideo) {
       session.pendingSocialVideo = null;
       await reply(ctx, "Envío de /video o /trad cancelado.", { voice: false });
+      return;
+    }
+    if (session.pendingDestChoice) {
+      session.pendingDestChoice = null;
+      session.publishDest = "fvdigital";
+      await reply(ctx, "Destino cancelado.", { voice: false });
       return;
     }
     if (session.pendingLinkChoice) {
@@ -3562,6 +3667,41 @@ export async function startBot() {
     }
   });
 
+  bot.action(/^dest:(fvdigital|f1rd|both|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    const pending = session.pendingDestChoice;
+    const action = ctx.match[1];
+    try {
+      if (action === "cancel") {
+        session.pendingDestChoice = null;
+        session.publishDest = "fvdigital";
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("Destino cancelado.");
+        return;
+      }
+      if (!pending?.url) {
+        await ctx.answerCbQuery("No hay enlace");
+        await ctx.reply("No hay enlace pendiente. Pega de nuevo la URL.");
+        return;
+      }
+      await ctx.answerCbQuery(destLabel(action));
+      await resumeAfterPublishDest(ctx, action, pending);
+    } catch (error) {
+      console.error("dest choice:", error);
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
   bot.action(/^link:(video|news|cancel)$/, async (ctx) => {
     if (unauthorized(ctx)) {
       await ctx.answerCbQuery("No autorizado");
@@ -3682,7 +3822,10 @@ export async function startBot() {
         return;
       }
       try {
-        if (session.pendingSocialVideo.kind === "trad") {
+        const kind = session.pendingSocialVideo.kind === "trad" ? "trad" : "video";
+        session.pendingSocialVideo = null;
+        if (await maybeAskPublishDest(ctx, videoUrl, [], kind)) return;
+        if (kind === "trad") {
           await processTradVideoUrl(ctx, videoUrl);
         } else {
           await processSocialVideoUrl(ctx, videoUrl);
@@ -3711,6 +3854,9 @@ export async function startBot() {
 
     if (url) {
       try {
+        if (await maybeAskPublishDest(ctx, url, parseExtraCategories(trimmed), "link")) {
+          return;
+        }
         if (await maybeAskSocialLinkChoice(ctx, url, parseExtraCategories(trimmed))) {
           return;
         }

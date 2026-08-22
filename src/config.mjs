@@ -129,6 +129,14 @@ export const config = {
     hashtag: process.env.PUBLISH_WEBHOOK_HASHTAG || "#fvdigital",
     source: process.env.PUBLISH_WEBHOOK_SOURCE || "asistente-wp",
   },
+  f1rdWebhook: {
+    url:
+      process.env.F1RD_WEBHOOK_URL ||
+      "https://meny.app.n8n.cloud/webhook/formula1rd",
+    hashtag: process.env.F1RD_WEBHOOK_HASHTAG || "#f1rd",
+    source: process.env.PUBLISH_WEBHOOK_SOURCE || "asistente-wp",
+    enabled: process.env.F1RD_WEBHOOK !== "false",
+  },
   r2: {
     publicBaseUrl: (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/$/, ""),
     endpoint:

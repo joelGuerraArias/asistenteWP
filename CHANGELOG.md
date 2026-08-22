@@ -1,6 +1,17 @@
 # Versiones — AsistenteWP
 
-La versión vive en `package.json`. Cada release suma un punto (patch: `1.0.x`).
+La versión vive en `package.json`. Major (`2.0.0`) cuando cambia el flujo de publicación.
+
+## 2.0.0 — 2026-08-22
+
+Destino de publicación **antes** de Video/Noticia en enlaces de Instagram, Facebook, YouTube y Dailymotion.
+
+- El bot pregunta **FV Digital**, **F1RD** o **Ambos**
+- FV Digital: WordPress + webhook `#fvdigital`
+- F1RD: solo redes (`#f1rd`), sin WordPress
+- Ambos: WordPress FV y los dos webhooks
+- Noticias de periódicos (URL normal) siguen solo FV Digital
+- X/Twitter no entra en esta pregunta de destino
 
 ## 1.0.1 — 2026-08-22
 
