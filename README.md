@@ -83,6 +83,20 @@ npm run bot:uninstall
 
 Elimina la tarea programada y el acceso directo de Startup. **No borra** el proyecto ni el `.env`; solo deja de iniciar solo.
 
+### Feed → redes (cron horario)
+
+Cada hora de **09:15 a 21:15** publica hasta 2 noticias nuevas por marca (gráfico + caption → webhook), sin repetir.
+
+```powershell
+npm run feed:repost              # FV + F1RD ahora
+npm run feed:repost:f1           # solo Formula1RD
+npm run feed:repost:dry          # simular sin webhook
+npm run feed:repost:cron:install # tarea Windows AsistenteWP-FeedRepost
+npm run feed:repost:cron:uninstall
+```
+
+Variables en `.env` / `.env.example`: `FEED_REPOST_*`, `F1RD_WEBHOOK_*`.
+
 ### Resumen rápido
 
 | Acción | Comando |
