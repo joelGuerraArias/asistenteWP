@@ -1,6 +1,6 @@
 # AsistenteWP — JARVIS para FV Digital
 
-**Versión actual: `2.0.0`** — historial en [CHANGELOG.md](CHANGELOG.md).
+**Versión actual: `2.5.0`** — historial en [CHANGELOG.md](CHANGELOG.md).
 
 Bot de Telegram + asistente WordPress para **fvdigital.do**. Publica noticias desde el móvil (texto, voz, foto, enlace), redacta artículos con IA y se conecta a Cursor vía [mcp-wordpress](https://github.com/docdyhr/mcp-wordpress).
 
@@ -201,6 +201,7 @@ Busca tu bot (ej. `@AsisWPBot`) y envía mensajes.
 | **Enlace YT / IG / FB / Dailymotion** | Primero pregunta destino: **FV Digital**, **F1RD** o **Ambos**; luego Video o Noticia |
 | **Enlace de periódico** | Solo FV Digital (WordPress + redes FV) |
 | **X / Twitter** | Video o Noticia, sin pregunta F1RD |
+| **Cron feed (09:15–21:15)** | Hasta 2 noticias nuevas de FV Digital → webhook FV; hasta 2 de Motorsport + Híbridos (intercaladas) → webhook Formula1RD |
 | **Foto + texto** | Crea post con imagen destacada |
 | **Texto largo** (noticia) | Publica tras unos segundos de espera |
 | **Nota de voz** | Transcribe y actúa como texto |
@@ -364,6 +365,9 @@ AsistenteWP/
 | `npm run test:connection` | Probar WordPress |
 | `npm run mcp` | Servidor MCP para Cursor |
 | `npm run disable-photon` | Desactivar Photon en Jetpack |
+| `npm run feed:repost` | Publicar feeds FV + F1RD ahora |
+| `npm run feed:repost:f1` | Solo feed Formula1RD |
+| `npm run feed:repost:cron:install` | Cron feed 09:15–21:15 |
 
 ---
 

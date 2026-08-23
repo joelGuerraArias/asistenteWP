@@ -1,6 +1,28 @@
 # Versiones — AsistenteWP
 
-La versión vive en `package.json`. Major (`2.0.0`) cuando cambia el flujo de publicación.
+La versión vive en `package.json`.
+
+## 2.5.0 — 2026-08-23
+
+Publicación automática desde feeds RSS a webhooks de redes (mismo gráfico + caption que al pegar un enlace).
+
+### Feed → redes (cron 09:15–21:15)
+
+- Hasta **2 noticias nuevas** por marca y corrida; **nunca repite** (`guid`/`link` en `.feed-repost-sent.json`)
+- **FV Digital:** `https://fvdigital.do/feed` → webhook `fvdigital` (`#fvdigital`)
+- **F1RD:** Motorsport F1 + Híbridos y Eléctricos **intercalados** → webhook `formula1rd` (`#Formula1RD`)
+  - `https://lat.motorsport.com/rss/f1/news/`
+  - `https://www.hibridosyelectricos.com/uploads/feeds/feed_hibridos-y-electricos_es.xml`
+- Genera titular corto + caption con IA, tarjeta social (R2) y envía al webhook
+- Aviso obligatorio en Telegram (con foto de la tarjeta)
+- Gráficos F1RD: logo **Fórmula 1 Al Límite** (alpha), tag **f1mister**, pie **www.formula1rd.com**
+- Tarea Windows `AsistenteWP-FeedRepost`
+- Comandos: `npm run feed:repost`, `feed:repost:dry`, `feed:repost:f1`, `feed:repost:cron:install`
+
+### Destino F1RD en el bot (desde 2.0)
+
+- Destino FV / F1RD / Ambos al pegar IG/FB/YT/Dailymotion
+- Hashtag F1RD unificado a `#Formula1RD`
 
 ## 2.0.0 — 2026-08-22
 

@@ -14,8 +14,15 @@ import {
   transcribeAudio,
 } from "./audio.mjs";
 import { askDeepseek, buildNewsPostFromOcr, buildNoteFromDocument, composeCardHeadline, correctHeadlineSpelling, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
-import { generateNewsCard, fetchImageBuffer } from "./social-card.mjs";
-import { publishToDestinations, isF1ChoiceUrl, destIncludesFv, destLabel } from "./publish-webhook.mjs";
+import { generateNewsCard, fetchImageBuffer, LOGO_F1RD_PATH } from "./social-card.mjs";
+import {
+  publishToDestinations,
+  isF1ChoiceUrl,
+  destIncludesFv,
+  destLabel,
+  destPrimaryHashtag,
+  assertDestWebhooksReady,
+} from "./publish-webhook.mjs";
 import { isPublicR2Url, uploadToR2 } from "./r2.mjs";
 import { extractFirstUrl, extractUrlFromMessage, fetchArticleFromUrl, detectSocialPlatform, socialPlatformLabel } from "./news-fetch.mjs";
 import {
@@ -400,13 +407,25 @@ async function sendSocialCard(ctx, { title, imageBuffer = null, imageUrl = null,
     };
 
     const cardTitle = await composeCardHeadline(title, bodyText).catch(() => title);
+    const dest = session.publishDest || "fvdigital";
+    const cardOpts =
+      dest === "f1rd"
+        ? {
+            logoPath: LOGO_F1RD_PATH,
+            badgeText: "f1mister",
+            handle: config.f1rdWebhook?.hashtag || "#Formula1RD",
+            site: "www.formula1rd.com",
+            logoWidthRatio: 0.2,
+          }
+        : {};
     const card = await generateNewsCard({
       backgroundBuffer: bg,
       title: cardTitle,
+      ...cardOpts,
     });
 
     await ctx.replyWithPhoto(Input.fromBuffer(card, "fv-card.png"), {
-      caption: `Gráfico para redes (${destLabel(session.publishDest || "fvdigital")})`,
+      caption: `Gráfico para redes (${destLabel(dest)})`,
     });
 
     await sendCardToWebhook(ctx, { card, title, bodyText });
@@ -443,10 +462,7 @@ async function sendCardToWebhook(ctx, { card, title, bodyText = "" }) {
       return;
     }
 
-    const seedTag =
-      dest === "f1rd"
-        ? config.f1rdWebhook?.hashtag || "#f1rd"
-        : config.publishWebhook.hashtag || "#fvdigital";
+    const seedTag = destPrimaryHashtag(dest);
     const captionSeed = await generateSocialCaption(title, bodyText, {
       hashtag: seedTag,
     }).catch(() => `${title} ${seedTag}`.trim());
@@ -570,11 +586,13 @@ async function askSocialLinkChoice(ctx, url, extraCategorySlugs = []) {
   };
   await ctx.reply(
     [
-      `Enlace de ${label}.`,
+      `Enlace de ${label}. Destino: ${destLabel(session.publishDest || "fvdigital")}.`,
       "",
       "¿Qué hago con él?",
       "• Video — descargar y publicar en redes",
-      "• Noticia — titular, imagen y texto a WordPress",
+      destIncludesFv(session.publishDest)
+        ? "• Noticia — titular, imagen y texto a WordPress"
+        : "• Noticia — titular, imagen y gráfico a redes (sin WordPress)",
     ].join("\n"),
     { ...socialLinkChoiceKeyboard(), disable_web_page_preview: true }
   );
@@ -598,8 +616,8 @@ function socialVideoConfirmKeyboard() {
   ]);
 }
 
-function ensureCaptionHashtag(caption = "") {
-  const hashtag = config.publishWebhook?.hashtag || "#fvdigital";
+function ensureCaptionHashtag(caption = "", dest = "fvdigital") {
+  const hashtag = destPrimaryHashtag(dest);
   const base = String(caption || "").trim();
   if (!base) return hashtag;
   return base.includes(hashtag) ? base : `${base}\n\n${hashtag}`.trim();
@@ -624,7 +642,8 @@ async function askSocialVideoConfirm(ctx, pending) {
     "📝 Caption propuesto:",
     pending.caption,
     "",
-    "¿Lo envío al webhook de redes?",
+    `Destino: ${destLabel(getSession(ctx.chat.id).publishDest || "fvdigital")}`,
+    "¿Lo envío? (el destino ya está elegido)",
   ]
     .filter(Boolean)
     .join("\n");
@@ -636,19 +655,18 @@ async function askSocialVideoConfirm(ctx, pending) {
 }
 
 async function processSocialVideoUrl(ctx, sourceUrl) {
+  const session = getSession(ctx.chat.id);
+  const dest = session.publishDest || "fvdigital";
   if (!config.r2?.enabled) {
     throw new Error("R2 no está configurado. Revisa R2_* en .env.");
   }
-  if (!config.publishWebhook?.enabled || !config.publishWebhook?.url) {
-    throw new Error("Webhook deshabilitado o falta PUBLISH_WEBHOOK_URL.");
-  }
+  assertDestWebhooksReady(dest);
   if (!isSupportedSocialVideoUrl(sourceUrl)) {
     throw new Error(
-      "URL no soportada. Usa YouTube, Instagram, Facebook o X."
+      "URL no soportada. Usa YouTube, Instagram, Facebook, Dailymotion o X."
     );
   }
 
-  const session = getSession(ctx.chat.id);
   session.pendingSocialVideo = null;
 
   await reply(ctx, "⏳ Descargando video…", { voice: false });
@@ -671,13 +689,13 @@ async function processSocialVideoUrl(ctx, sourceUrl) {
   }
 
   await reply(ctx, "✍️ Generando caption con IA…", { voice: false });
-  const hashtag = config.publishWebhook.hashtag || "#fvdigital";
+  const hashtag = destPrimaryHashtag(dest);
   const rawCaption = await generateSocialCaption(
     downloaded.title,
     downloaded.description || downloaded.title,
     { hashtag }
   ).catch(() => downloaded.title);
-  const caption = ensureCaptionHashtag(rawCaption);
+  const caption = ensureCaptionHashtag(rawCaption, dest);
 
   const pending = {
     videoUrl,
@@ -760,7 +778,7 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
   }
 
   await reply(ctx, "✍️ Generando caption…", { voice: false });
-  const hashtag = config.publishWebhook.hashtag || "#fvdigital";
+  const hashtag = destPrimaryHashtag(session.publishDest || "fvdigital");
   const captionSeed =
     built.headline ||
     built.translation?.slice(0, 280) ||
@@ -772,7 +790,7 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
     captionSeed,
     { hashtag }
   ).catch(() => captionSeed);
-  const caption = ensureCaptionHashtag(rawCaption);
+  const caption = ensureCaptionHashtag(rawCaption, session.publishDest || "fvdigital");
 
   const pending = {
     kind: "trad",
@@ -803,18 +821,17 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
 }
 
 async function processTradVideoUrl(ctx, sourceUrl) {
+  const dest = getSession(ctx.chat.id).publishDest || "fvdigital";
   if (!config.r2?.enabled) {
     throw new Error("R2 no está configurado. Revisa R2_* en .env.");
   }
-  if (!config.publishWebhook?.enabled || !config.publishWebhook?.url) {
-    throw new Error("Webhook deshabilitado o falta PUBLISH_WEBHOOK_URL.");
-  }
+  assertDestWebhooksReady(dest);
   if (!config.audio.mistralApiKey) {
     throw new Error("Falta MISTRAL_API_KEY para /trad.");
   }
   if (!isSupportedSocialVideoUrl(sourceUrl)) {
     throw new Error(
-      "URL no soportada. Usa YouTube, Instagram, Facebook o X."
+      "URL no soportada. Usa YouTube, Instagram, Facebook, Dailymotion o X."
     );
   }
 
@@ -1233,8 +1250,11 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
           [
             `✅ Publicación de ${platformLabel} procesada.`,
             `Titular: ${spanishTitle}`,
+            `Destino: ${destLabel(session.publishDest || "fvdigital")}.`,
             "",
-            "Elige la foto destacada (siempre la verás antes de publicar).",
+            destIncludesFv(session.publishDest)
+              ? "Elige la foto destacada (siempre la verás antes de publicar)."
+              : "Elige la imagen para el gráfico de redes (F1RD no publica en WordPress).",
           ].join("\n"),
           { voice: false }
         );
@@ -1258,7 +1278,7 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
           console.warn("Imagen de noticia no descargada:", error.message);
           await status(ctx, `3/4 ⚠️ Sin imagen: ${error.message}`);
         }
-      } else {
+      } else if (doWp) {
         await status(ctx, "3/4 ℹ️ Continúo sin imagen destacada.");
       }
 
@@ -3097,7 +3117,7 @@ export async function startBot() {
         session.pendingSocialVideo = { step: "await_url", kind: "trad" };
         await reply(
           ctx,
-          "Envía el enlace del video (YouTube, Instagram, Facebook o X).\nSi NO está en español: lo traduzco con voz pabmatos.\nSi YA está en español: solo pongo overlay FV en 9:16.",
+          "Envía el enlace del video (YouTube, Instagram, Facebook, Dailymotion o X).\nSi NO está en español: lo traduzco con voz pabmatos.\nSi YA está en español: solo pongo overlay FV en 9:16.",
           { voice: false }
         );
         return;
@@ -3817,7 +3837,7 @@ export async function startBot() {
       const videoUrl = url || extractFirstUrl(trimmed);
       if (!videoUrl) {
         await ctx.reply(
-          "Necesito un enlace válido (YouTube, Instagram, Facebook o X). O /cancelar."
+          "Necesito un enlace válido (YouTube, Instagram, Facebook, Dailymotion o X). O /cancelar."
         );
         return;
       }
@@ -3840,7 +3860,7 @@ export async function startBot() {
     // /video: editando caption
     if (session.pendingSocialVideo?.step === "edit_caption") {
       const pending = session.pendingSocialVideo;
-      pending.caption = ensureCaptionHashtag(trimmed);
+      pending.caption = ensureCaptionHashtag(trimmed, session.publishDest || "fvdigital");
       pending.step = "confirm";
       session.pendingSocialVideo = pending;
       if (session.lastVideo) session.lastVideo.caption = pending.caption;

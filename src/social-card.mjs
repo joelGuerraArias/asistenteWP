@@ -8,6 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const BRAND_RED = "#ED1C24";
 const LOGO_PATH = join(__dirname, "..", "assets", "logo_fv.png");
+export const LOGO_F1RD_PATH = join(__dirname, "..", "assets", "logo_f1rd.png");
 
 function escapeXml(text = "") {
   return String(text)
@@ -163,17 +164,21 @@ export async function generateNewsCard({
   date = new Date(),
   handle = config.socialCard?.handle || "#fvdigital.do",
   site = config.socialCard?.site || "www.fvdigital.do",
+  logoPath = LOGO_PATH,
+  badgeText = "FV",
+  logoWidthRatio = 0.24,
 }) {
   if (!backgroundBuffer) throw new Error("Falta backgroundBuffer");
   if (!title) throw new Error("Falta el titular");
 
   const bg = await prepareSquareBackground(backgroundBuffer, size);
 
-  const logoW = Math.round(size * 0.24);
+  const logoW = Math.round(size * Math.min(0.55, Math.max(0.15, logoWidthRatio)));
   let logoBuffer = null;
   let logoMeta = null;
-  if (existsSync(LOGO_PATH)) {
-    logoBuffer = await sharp(LOGO_PATH).resize({ width: logoW }).png().toBuffer();
+  const resolvedLogo = logoPath || LOGO_PATH;
+  if (existsSync(resolvedLogo)) {
+    logoBuffer = await sharp(resolvedLogo).resize({ width: logoW }).png().toBuffer();
     logoMeta = await sharp(logoBuffer).metadata();
   }
 
@@ -200,7 +205,30 @@ export async function generateNewsCard({
   const badgeR = Math.round(size * 0.058);
   const badgeCx = pad + badgeR;
   const badgeCy = pad + badgeR;
-  const badgeFont = Math.round(badgeR * 0.85);
+  const badgeLabelRaw = String(badgeText || "FV").trim() || "FV";
+  const badgeIsShort = badgeLabelRaw.length <= 3;
+  const badgeLabel = badgeIsShort
+    ? badgeLabelRaw.slice(0, 3).toUpperCase()
+    : badgeLabelRaw;
+  const badgeFont = badgeIsShort
+    ? Math.round(badgeR * 0.85)
+    : Math.round(size * 0.028);
+  const badgePadX = Math.round(size * 0.018);
+  const badgeH = Math.round(size * 0.07);
+  const badgeW = badgeIsShort
+    ? badgeR * 2
+    : Math.round(badgeFont * badgeLabel.length * 0.62 + badgePadX * 2);
+  const badgeX = pad;
+  const badgeY = pad;
+  const badgeTextX = badgeIsShort ? badgeCx : badgeX + badgeW / 2;
+  const badgeTextY = badgeIsShort
+    ? badgeCy + badgeFont * 0.35
+    : badgeY + badgeH / 2 + badgeFont * 0.35;
+  const badgeShape = badgeIsShort
+    ? `<circle cx="${badgeCx}" cy="${badgeCy}" r="${badgeR}" fill="${BRAND_RED}"/>`
+    : `<rect x="${badgeX}" y="${badgeY}" width="${badgeW}" height="${badgeH}" rx="${Math.round(
+        badgeH / 2
+      )}" ry="${Math.round(badgeH / 2)}" fill="${BRAND_RED}"/>`;
 
   const titleCx = Math.round(size / 2);
   const titleTspans = titleLines
@@ -245,8 +273,8 @@ export async function generateNewsCard({
 
   <rect x="0" y="0" width="${size}" height="${size}" fill="url(#fade)"/>
 
-  <circle cx="${badgeCx}" cy="${badgeCy}" r="${badgeR}" fill="${BRAND_RED}"/>
-  <text x="${badgeCx}" y="${badgeCy + badgeFont * 0.35}" class="badge">FV</text>
+  ${badgeShape}
+  <text x="${badgeTextX}" y="${badgeTextY}" class="badge">${escapeXml(badgeLabel)}</text>
 
   ${titleTspans}
 

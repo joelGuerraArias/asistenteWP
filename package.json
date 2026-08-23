@@ -1,6 +1,6 @@
 {
   "name": "asistente-wp",
-  "version": "2.0.0",
+  "version": "2.5.0",
   "private": true,
   "description": "Asistente WordPress para Cursor via mcp-wordpress",
   "type": "module",
@@ -45,7 +45,12 @@
     "frase:test": "node scripts/run-frase-celebre.mjs --test",
     "frase:render": "node scripts/run-frase-celebre.mjs",
     "frase:cron:install": "powershell -ExecutionPolicy Bypass -File scripts/install-frase-cron.ps1",
-    "frase:cron:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/uninstall-frase-cron.ps1"
+    "frase:cron:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/uninstall-frase-cron.ps1",
+    "feed:repost": "node scripts/run-feed-repost.mjs",
+    "feed:repost:dry": "node scripts/run-feed-repost.mjs --dry-run",
+    "feed:repost:f1": "node scripts/run-feed-repost.mjs --f1",
+    "feed:repost:cron:install": "powershell -ExecutionPolicy Bypass -File scripts/install-feed-repost-cron.ps1",
+    "feed:repost:cron:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/uninstall-feed-repost-cron.ps1"
   },
   "dependencies": {
     "google-tts-api": "^0.0.6",

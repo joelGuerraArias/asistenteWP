@@ -133,9 +133,31 @@ export const config = {
     url:
       process.env.F1RD_WEBHOOK_URL ||
       "https://meny.app.n8n.cloud/webhook/formula1rd",
-    hashtag: process.env.F1RD_WEBHOOK_HASHTAG || "#f1rd",
+    hashtag: process.env.F1RD_WEBHOOK_HASHTAG || "#Formula1RD",
     source: process.env.PUBLISH_WEBHOOK_SOURCE || "asistente-wp",
     enabled: process.env.F1RD_WEBHOOK !== "false",
+  },
+  feedRepost: {
+    enabled: process.env.FEED_REPOST_ENABLED !== "false",
+    url: process.env.FEED_REPOST_URL || "https://fvdigital.do/feed",
+    count: Math.max(1, Math.min(10, Number(process.env.FEED_REPOST_COUNT || 2))),
+    start: process.env.FEED_REPOST_START || "09:15",
+    end: process.env.FEED_REPOST_END || "21:15",
+    fvEnabled: process.env.FEED_REPOST_FV !== "false",
+    f1Enabled: process.env.FEED_REPOST_F1 !== "false",
+    f1Url:
+      process.env.FEED_REPOST_F1_URL ||
+      "https://lat.motorsport.com/rss/f1/news/",
+    f1HibridosUrl:
+      process.env.FEED_REPOST_F1_HIBRIDOS_URL ||
+      "https://www.hibridosyelectricos.com/uploads/feeds/feed_hibridos-y-electricos_es.xml",
+    f1Count: Math.max(
+      1,
+      Math.min(
+        10,
+        Number(process.env.FEED_REPOST_F1_COUNT || process.env.FEED_REPOST_COUNT || 2)
+      )
+    ),
   },
   r2: {
     publicBaseUrl: (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/$/, ""),

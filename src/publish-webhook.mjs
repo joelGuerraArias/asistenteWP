@@ -33,12 +33,30 @@ export function destLabel(dest = "fvdigital") {
   return "FV Digital";
 }
 
+export function destPrimaryHashtag(dest = "fvdigital") {
+  if (dest === "f1rd") return config.f1rdWebhook?.hashtag || "#Formula1RD";
+  return config.publishWebhook?.hashtag || "#fvdigital";
+}
+
+export function assertDestWebhooksReady(dest = "fvdigital") {
+  for (const target of webhookTargets(dest)) {
+    const cfg = targetConfig(target);
+    if (!cfg.enabled || !cfg.url) {
+      throw new Error(
+        target === "f1rd"
+          ? "Webhook F1RD deshabilitado o falta F1RD_WEBHOOK_URL."
+          : "Webhook FV deshabilitado o falta PUBLISH_WEBHOOK_URL."
+      );
+    }
+  }
+}
+
 function targetConfig(target = "fvdigital") {
   if (target === "f1rd") {
     const cfg = config.f1rdWebhook || {};
     return {
       url: cfg.url || "https://meny.app.n8n.cloud/webhook/formula1rd",
-      hashtag: cfg.hashtag || "#f1rd",
+      hashtag: cfg.hashtag || "#Formula1RD",
       source: cfg.source || config.publishWebhook?.source || "asistente-wp",
       enabled: cfg.enabled !== false && Boolean(cfg.url || true),
     };

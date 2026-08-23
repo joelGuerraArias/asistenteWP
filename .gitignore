@@ -11,6 +11,7 @@ test-*.mp4
 *.log
 .bot.pid
 .last-chat.json
+.feed-repost-sent.json
 logs/
 assets/fonts/cache/
 assets/fonts/fonts.conf
