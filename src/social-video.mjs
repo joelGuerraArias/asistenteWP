@@ -2,7 +2,7 @@
  * Descarga videos de YouTube / Instagram / Facebook / X vía yt-dlp.
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
@@ -122,6 +122,23 @@ function contentTypeForExt(ext = "") {
   return "video/mp4";
 }
 
+/** Cookies Netscape válidas (no vacío / no JSON de extensión mal exportada). */
+function isNetscapeCookiesFile(filePath) {
+  try {
+    const raw = readFileSync(filePath, "utf8");
+    if (!raw || !raw.trim()) return false;
+    if (/#\s*(netscape|http\s*cookie\s*file)/i.test(raw)) return true;
+    const dataLine = raw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith("#"));
+    if (!dataLine) return false;
+    return dataLine.split("\t").length >= 7;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Descarga un video social y devuelve buffer + metadata.
  * @returns {Promise<{ buffer, contentType, ext, title, description, sourceUrl, platform, filename, bytes }>}
@@ -159,8 +176,18 @@ export async function downloadSocialVideo(sourceUrl, { onStatus } = {}) {
   ];
 
   const cookiesFile = String(config.socialVideo?.cookiesFile || "").trim();
-  const cookiesBrowser = config.socialVideo?.cookiesFromBrowser;
-  if (cookiesFile && existsSync(cookiesFile)) {
+  const cookiesBrowser = String(config.socialVideo?.cookiesFromBrowser || "").trim();
+  if (cookiesFile) {
+    if (!existsSync(cookiesFile)) {
+      throw new Error(
+        `YTDLP_COOKIES_FILE no existe:\n${cookiesFile}\n\nExporta cookies Netscape («Get cookies.txt LOCALLY» en Instagram) y actualiza .env.`
+      );
+    }
+    if (!isNetscapeCookiesFile(cookiesFile)) {
+      throw new Error(
+        `Cookies vacías o no Netscape:\n${cookiesFile}\n\n1. Entra a instagram.com en Chrome\n2. Extensión «Get cookies.txt LOCALLY» → Export\n3. Guarda/sobrescribe ese .txt (debe empezar con # Netscape HTTP Cookie File)\n4. Reintenta /video`
+      );
+    }
     args.push("--cookies", cookiesFile);
   } else if (cookiesBrowser) {
     args.push("--cookies-from-browser", cookiesBrowser);

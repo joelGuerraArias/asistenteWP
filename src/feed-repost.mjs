@@ -264,11 +264,14 @@ async function publishOneItem(item, brand, { dryRun = false } = {}) {
   const bodyText = item.description || "";
 
   // Misma ruta que el bot al pegar un enlace: titular corto + caption de redes.
-  const cardTitle = await composeCardHeadline(item.title, bodyText).catch(
+  // FV y F1RD: gráfico y caption en español.
+  const lang = "es";
+  const cardTitle = await composeCardHeadline(item.title, bodyText, { lang }).catch(
     () => item.title
   );
   const caption = await generateSocialCaption(item.title, bodyText, {
     hashtag,
+    lang,
   }).catch(() => buildCaptionFallback(item, brand));
 
   if (dryRun) {
@@ -367,13 +370,6 @@ function feedSources() {
           id: "motorsport",
           label: "Motorsport F1",
           url: cfg.f1Url || "https://lat.motorsport.com/rss/f1/news/",
-        },
-        {
-          id: "hibridos",
-          label: "Híbridos y Eléctricos",
-          url:
-            cfg.f1HibridosUrl ||
-            "https://www.hibridosyelectricos.com/uploads/feeds/feed_hibridos-y-electricos_es.xml",
         },
       ],
       count: cfg.f1Count ?? cfg.count,

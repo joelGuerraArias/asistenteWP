@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $TaskName = "AsistenteWP-FeedRepost"
 $RunScript = Join-Path $PSScriptRoot "run-feed-repost.ps1"
+$PsExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 $startRaw = "09:15"
 $endRaw = "21:15"
@@ -32,11 +33,10 @@ if (($end.Hour * 60 + $end.Minute) -lt ($start.Hour * 60 + $start.Minute)) {
 }
 
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
+    -Execute $PsExe `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunScript`"" `
     -WorkingDirectory $Root
 
-# Un trigger diario por cada hora :mm entre start y end (mismo minuto).
 $triggers = @()
 for ($h = $start.Hour; $h -le $end.Hour; $h++) {
     $at = Get-Date -Hour $h -Minute $start.Minute -Second 0
@@ -48,7 +48,14 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
     -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 20) `
+    -RestartCount 2 `
+    -RestartInterval (New-TimeSpan -Minutes 2)
+
+$principal = New-ScheduledTaskPrincipal `
+    -UserId $env:USERNAME `
+    -LogonType Interactive `
+    -RunLevel Limited
 
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing) {
@@ -60,6 +67,7 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $triggers `
     -Settings $settings `
+    -Principal $principal `
     -Description "Feeds FV + Motorsport F1: hasta 2 nuevas c/u → webhooks fvdigital y formula1rd ($startRaw-$endRaw)" | Out-Null
 
 Write-Host "Tarea programada instalada:"

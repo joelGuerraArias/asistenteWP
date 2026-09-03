@@ -66,9 +66,41 @@ async function transcribeWithMistral(
   return { text, language: data.language || null, segments: data.segments || [], raw: data };
 }
 
+const GROQ_ALLOWED_EXTS = new Set([
+  "flac",
+  "mp3",
+  "mp4",
+  "mpeg",
+  "mpga",
+  "m4a",
+  "ogg",
+  "opus",
+  "wav",
+  "webm",
+]);
+
+/** Telegram voice = Ogg/Opus con extensión .oga; Groq solo acepta la allowlist. */
+function normalizeSttFilename(ext = "ogg") {
+  let e = String(ext || "ogg")
+    .replace(/^\./, "")
+    .toLowerCase()
+    .trim();
+  if (e === "oga") e = "ogg";
+  if (!GROQ_ALLOWED_EXTS.has(e)) e = "ogg";
+  return `telegram-audio.${e}`;
+}
+
 async function transcribeWithOpenAICompat(buffer, filename, provider) {
   const form = new FormData();
-  form.append("file", new Blob([buffer]), filename);
+  const mime =
+    filename.endsWith(".ogg") || filename.endsWith(".opus")
+      ? "audio/ogg"
+      : filename.endsWith(".webm")
+        ? "audio/webm"
+        : filename.endsWith(".wav")
+          ? "audio/wav"
+          : "audio/mpeg";
+  form.append("file", new Blob([buffer], { type: mime }), filename);
   form.append("model", provider.model);
   form.append("language", config.audio.language);
 
@@ -130,12 +162,12 @@ function buildTranscribeProviders() {
 }
 
 export async function transcribeAudio(buffer, ext = "ogg", opts = {}) {
-  const filename = `telegram-audio.${ext}`;
+  const filename = normalizeSttFilename(ext);
   const providers = buildTranscribeProviders();
 
   if (!providers.length) {
     throw new Error(
-      "Configura MISTRAL_API_KEY en .env (SPEECH_PROVIDER=mistral)"
+      "Configura GROQ_API_KEY o MISTRAL_API_KEY en .env (SPEECH_PROVIDER=groq|mistral)"
     );
   }
 
@@ -356,6 +388,69 @@ export async function synthesizeSpeech(text, opts = {}) {
   return outPath;
 }
 
+function resolveFfmpegBin() {
+  return (
+    config.trad?.ffmpegPath ||
+    process.env.FFMPEG_PATH ||
+    "ffmpeg"
+  );
+}
+
+/**
+ * Convierte MP3 a OGG/Opus para nota de voz de Telegram
+ * (sin carátula / player de música).
+ */
+export async function mp3ToVoiceOgg(mp3BufferOrPath) {
+  const { spawn } = await import("node:child_process");
+  const mp3Path =
+    typeof mp3BufferOrPath === "string"
+      ? mp3BufferOrPath
+      : (() => {
+          const p = tempPath("mp3");
+          writeFileSync(p, mp3BufferOrPath);
+          return p;
+        })();
+  const outPath = tempPath("ogg");
+  const ffmpeg = resolveFfmpegBin();
+  const wroteTemp = typeof mp3BufferOrPath !== "string";
+
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn(
+        ffmpeg,
+        [
+          "-y",
+          "-i",
+          mp3Path,
+          "-c:a",
+          "libopus",
+          "-b:a",
+          "48k",
+          "-vbr",
+          "on",
+          "-application",
+          "voip",
+          "-f",
+          "ogg",
+          outPath,
+        ],
+        { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+      );
+      let err = "";
+      child.stderr.on("data", (d) => {
+        err += d.toString();
+      });
+      child.on("close", (code) =>
+        code === 0 ? resolve() : reject(new Error(err.slice(-400) || `ffmpeg ${code}`))
+      );
+      child.on("error", reject);
+    });
+    return outPath;
+  } finally {
+    if (wroteTemp) cleanupTemp(mp3Path);
+  }
+}
+
 export function cleanupTemp(path) {
   try {
     if (path && existsSync(path)) unlinkSync(path);
@@ -369,6 +464,9 @@ export async function readTempFile(path) {
 }
 
 export function getSpeechProviderLabel() {
+  if (config.audio.provider === "groq" && config.audio.groqApiKey) {
+    return "Groq (whisper-large-v3-turbo)";
+  }
   if (config.audio.mistralApiKey && config.audio.provider === "mistral") {
     return `Mistral (${config.audio.mistralTranscribeModel})`;
   }

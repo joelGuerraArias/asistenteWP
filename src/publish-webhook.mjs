@@ -35,6 +35,12 @@ export function destLabel(dest = "fvdigital") {
 
 export function destPrimaryHashtag(dest = "fvdigital") {
   if (dest === "f1rd") return config.f1rdWebhook?.hashtag || "#Formula1RD";
+  if (dest === "both") {
+    // Preview: ambos tags; cada webhook recibe el suyo en captionForTarget.
+    return `${config.publishWebhook?.hashtag || "#fvdigital"} ${
+      config.f1rdWebhook?.hashtag || "#Formula1RD"
+    }`;
+  }
   return config.publishWebhook?.hashtag || "#fvdigital";
 }
 
@@ -70,15 +76,29 @@ function targetConfig(target = "fvdigital") {
   };
 }
 
+/** Quita hashtags de marca y deja solo el del target (n8n F1 filtra por #Formula1RD). */
 export function captionForTarget(text = "", target = "fvdigital") {
   const tag = targetConfig(target).hashtag;
   let base = String(text || "")
     .replace(/#fvdigital(?:\.do)?/gi, "")
-    .replace(/#f1rd|#formula1rd/gi, "")
+    // Primero el tag largo; si no, #f1rd corto quedaría pegado a "ula1RD".
+    .replace(/#formula1rd\b/gi, "")
+    .replace(/#f1rd\b/gi, "")
     .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
   if (!base) return tag;
-  return base.includes(tag) ? base : `${base}\n\n${tag}`.trim();
+  const hasTag = new RegExp(
+    tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    "i"
+  ).test(base);
+  if (hasTag) {
+    // Normaliza a la forma canónica del config (p. ej. #Formula1RD).
+    return base
+      .replace(new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig"), tag)
+      .trim();
+  }
+  return `${base}\n\n${tag}`.trim();
 }
 
 /**
@@ -111,16 +131,16 @@ export async function publishToWebhook({
   }
 
   const hashtag = cfg.hashtag;
-  const baseText = (caption || title || "").trim();
-  const finalCaption = baseText.includes(hashtag)
-    ? baseText
-    : `${baseText} ${hashtag}`.trim();
+  // Siempre normaliza el caption del target (videos IG/FB/YT y tarjetas).
+  // n8n Formula1RD exige #Formula1RD o no publica.
+  const finalCaption = captionForTarget(caption || title || "", target);
 
   const payload = {
     caption: finalCaption,
     title: (title || "").trim() || finalCaption,
     source: cfg.source || "asistente-wp",
     brand: target,
+    hashtag,
   };
 
   if (videoUrl) {

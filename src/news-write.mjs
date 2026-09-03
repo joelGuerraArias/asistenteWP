@@ -132,7 +132,7 @@ export function isCasualMessage(text = "") {
 }
 
 export function isHelpMessage(text = "") {
-  return /^(ayuda|help|\?)$/i.test(text.trim());
+  return /^(ayuda|help|\?|comandos|\/)$/i.test(text.trim());
 }
 
 /** Texto solo no se publica a WP salvo que sea claramente una noticia */
@@ -148,6 +148,7 @@ export function wantsWriteNews(text = "") {
     /^\/escribir\b/i.test(text) ||
     /(?:escrib|redact|crea|genera)\w*\s+(?:me\s+)?(?:una\s+)?noticia/i.test(text) ||
     /(?:haz|prepara)\w*\s+(?:me\s+)?(?:una\s+)?noticia/i.test(text) ||
+    /(?:quiero|necesito)\s+(?:una\s+)?noticia/i.test(text) ||
     /noticia\s+escrita/i.test(text) ||
     /^noticia\s+(?:sobre|de|acerca)/i.test(text)
   );

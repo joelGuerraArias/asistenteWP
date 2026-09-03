@@ -112,7 +112,10 @@ export function isSpanishAudio(language, transcript = "") {
 }
 
 function overlayPathResolved() {
-  return String(config.trad?.overlayPath || "").trim() || DEFAULT_OVERLAY;
+  // Overlay de marca desactivado (TRAD_OVERLAY=false por defecto).
+  if (config.trad?.overlayEnabled === false) return "";
+  const custom = String(config.trad?.overlayPath || "").trim();
+  return custom || DEFAULT_OVERLAY;
 }
 
 function wrapHeadline(text = "", maxChars = 38, maxLines = 3) {
@@ -404,19 +407,11 @@ async function renderReel916({
 }
 
 /**
- * Prepara assets de /trad (sin montar el MP4 final).
- * Deja workDir en disco hasta finalizeTradJob / discardTradJob.
+ * Fase 1: descarga + STT + caption. No traduce ni genera TTS.
  */
-export async function prepareTradJob(sourceUrl, { onStatus } = {}) {
-  const voiceId =
-    config.trad?.voiceId ||
-    config.audio.mistralTtsVoiceId ||
-    "cccea7b3-4ebc-42af-92a6-f4ac3ba8215d";
+export async function inspectTradVideo(sourceUrl, { onStatus } = {}) {
   const originalVolume = Number(config.trad?.originalVolume ?? 0.05);
   const dubVolume = Number(config.trad?.dubVolume ?? 2);
-  const headlineDelay = Number(config.trad?.headlineDelay ?? 7);
-  const headlineTypeSeconds = Number(config.trad?.headlineTypeSeconds ?? 2);
-  const headlineVisibleSeconds = Number(config.trad?.headlineVisibleSeconds ?? 10);
   const width = Number(config.trad?.width || 1080);
   const height = Number(config.trad?.height || 1920);
 
@@ -433,8 +428,8 @@ export async function prepareTradJob(sourceUrl, { onStatus } = {}) {
 
     let transcript = "";
     let stt = { text: "", language: null, segments: [] };
-    let captionFallback = false;
     const hasAudioTrack = await probeHasAudio(videoIn);
+    const caption = captionFromMeta(downloaded);
 
     if (hasAudioTrack) {
       onStatus?.("🎧 Extrayendo audio…");
@@ -461,104 +456,32 @@ export async function prepareTradJob(sourceUrl, { onStatus } = {}) {
       }
     }
 
-    if (isEmptyTranscript(transcript)) {
-      const caption = captionFromMeta(downloaded);
-      if (!caption) {
-        throw new Error(
-          "El video no tiene audio usable ni caption/descripción para generar la voz."
-        );
-      }
-      captionFallback = true;
-      transcript = caption;
-      stt = { text: caption, language: null, segments: [] };
-      onStatus?.(
-        hasAudioTrack
-          ? "🔇 Sin voz clara — narración desde caption (original al 5%)…"
-          : "🔇 Sin audio — generando voz desde el caption…"
+    const hasTranscript = !isEmptyTranscript(transcript);
+    const hasCaption = !isEmptyTranscript(caption);
+
+    if (!hasTranscript && !hasCaption) {
+      throw new Error(
+        "El video no tiene audio usable ni caption/descripción para generar la voz."
       );
-    }
-
-    const alreadySpanish = isSpanishAudio(stt.language, transcript);
-
-    onStatus?.("📰 Generando titular del video…");
-    let headline = await generateTradHeadline({
-      transcript,
-      title: downloaded.title,
-      description: downloaded.description,
-    });
-    if (!alreadySpanish && headline) {
-      headline = await translateTextWithMistral(headline, {
-        context: "titular de video",
-      });
-    }
-
-    const ass = buildTypewriterAss(headline, {
-      width,
-      height,
-      startDelaySec: headlineDelay,
-      typeDurationSec: headlineTypeSeconds,
-      visibleDurationSec: headlineVisibleSeconds,
-    });
-    if (ass) await writeFile(assPath, ass, "utf8");
-
-    let translation = transcript;
-    let overlayOnly = false;
-    let needsVoice = false;
-    let mixOriginal = false;
-
-    if (captionFallback) {
-      if (!alreadySpanish) {
-        onStatus?.("🌐 Traduciendo caption al español…");
-        translation = await translateTextWithMistral(transcript, {
-          context: "caption de video para narración",
-        });
-      }
-      if (!translation) throw new Error("No pude preparar texto para la voz.");
-      needsVoice = true;
-      mixOriginal = hasAudioTrack;
-    } else if (alreadySpanish) {
-      overlayOnly = true;
-      translation = "";
-    } else {
-      onStatus?.("🌐 Traduciendo al español con Mistral…");
-      translation = await translateTextWithMistral(transcript, {
-        context: "guión de video para doblaje",
-      });
-      if (!translation) throw new Error("Traducción vacía.");
-      needsVoice = true;
-      mixOriginal = true;
-    }
-
-    if (needsVoice) {
-      onStatus?.(
-        captionFallback
-          ? "🗣️ Generando voz pabmatos desde el caption…"
-          : "🗣️ Generando voz pabmatos (Mistral TTS)…"
-      );
-      const voiceBuf = await synthesizeSpeechBuffer(translation, {
-        voiceId,
-        preferMistral: true,
-      });
-      await writeFile(voicePath, voiceBuf);
     }
 
     return {
+      step: "await_source_mode",
       workDir,
       videoIn,
-      voicePath: needsVoice ? voicePath : null,
-      assPath: ass ? assPath : null,
+      voicePath,
+      assPath,
       videoOut,
       width,
       height,
       originalVolume,
       dubVolume,
-      mixOriginal,
-      overlayOnly,
-      captionFallback,
-      transcript,
-      translation,
-      headline,
-      language: stt.language || (overlayOnly || captionFallback ? "es" : null),
+      hasAudioTrack,
+      hasTranscript,
+      hasCaption,
+      transcript: hasTranscript ? transcript : "",
+      caption: hasCaption ? caption : "",
+      sttLanguage: stt.language || null,
       title: downloaded.title,
       description: downloaded.description,
       sourceUrl: downloaded.sourceUrl,
@@ -569,6 +492,148 @@ export async function prepareTradJob(sourceUrl, { onStatus } = {}) {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
+}
+
+/**
+ * Fase 2: según modo elegido por el usuario.
+ * - translate_audio: dobla desde STT (o overlayOnly si ya es ES)
+ * - from_caption: SIEMPRE traduce caption a español y luego TTS
+ */
+export async function continueTradJob(job, { mode, onStatus } = {}) {
+  if (!job?.videoIn || !job?.workDir) {
+    throw new Error("No hay inspección /trad pendiente.");
+  }
+
+  const voiceId =
+    config.trad?.voiceId ||
+    config.audio.mistralTtsVoiceId ||
+    "cccea7b3-4ebc-42af-92a6-f4ac3ba8215d";
+  const headlineDelay = Number(config.trad?.headlineDelay ?? 7);
+  const headlineTypeSeconds = Number(config.trad?.headlineTypeSeconds ?? 2);
+  const headlineVisibleSeconds = Number(config.trad?.headlineVisibleSeconds ?? 10);
+
+  const chosen = String(mode || "").trim();
+  if (chosen !== "translate_audio" && chosen !== "from_caption") {
+    throw new Error('Modo inválido. Usa "translate_audio" o "from_caption".');
+  }
+
+  try {
+    let sourceText = "";
+    let captionFallback = false;
+    let overlayOnly = false;
+    let needsVoice = false;
+    let mixOriginal = false;
+    let translation = "";
+    let language = job.sttLanguage || null;
+
+    if (chosen === "from_caption") {
+      if (isEmptyTranscript(job.caption)) {
+        throw new Error("Este video no tiene caption/descripción para narrar.");
+      }
+      captionFallback = true;
+      sourceText = job.caption;
+      onStatus?.("🌐 Traduciendo caption al español…");
+      translation = await translateTextWithMistral(sourceText, {
+        context: "caption de video para narración en español",
+      });
+      if (!translation) {
+        throw new Error("No pude traducir el caption al español.");
+      }
+      needsVoice = true;
+      mixOriginal = Boolean(job.hasAudioTrack);
+      language = "es";
+    } else {
+      if (isEmptyTranscript(job.transcript)) {
+        throw new Error(
+          "No hay audio usable para traducir. Elige «Crear audio desde el caption»."
+        );
+      }
+      sourceText = job.transcript;
+      const alreadySpanish = isSpanishAudio(job.sttLanguage, sourceText);
+      if (alreadySpanish) {
+        overlayOnly = true;
+        translation = "";
+        language = job.sttLanguage || "es";
+        onStatus?.("🇪🇸 Audio ya en español — solo reel 9:16…");
+      } else {
+        onStatus?.("🌐 Traduciendo audio al español…");
+        translation = await translateTextWithMistral(sourceText, {
+          context: "guión de video para doblaje",
+        });
+        if (!translation) throw new Error("Traducción vacía.");
+        needsVoice = true;
+        mixOriginal = true;
+        language = "es";
+      }
+    }
+
+    const headlineSeed = translation || sourceText || job.caption || job.title;
+    onStatus?.("📰 Generando titular del video…");
+    let headline = await generateTradHeadline({
+      transcript: headlineSeed,
+      title: job.title,
+      description: job.description,
+    });
+    if (headline) {
+      headline = await translateTextWithMistral(headline, {
+        context: "titular de video en español",
+      });
+    }
+
+    const ass = buildTypewriterAss(headline, {
+      width: job.width,
+      height: job.height,
+      startDelaySec: headlineDelay,
+      typeDurationSec: headlineTypeSeconds,
+      visibleDurationSec: headlineVisibleSeconds,
+    });
+    if (ass) await writeFile(job.assPath, ass, "utf8");
+
+    if (needsVoice) {
+      onStatus?.(
+        captionFallback
+          ? "🗣️ Generando voz pabmatos desde el caption (ES)…"
+          : "🗣️ Generando voz pabmatos (Mistral TTS)…"
+      );
+      const voiceBuf = await synthesizeSpeechBuffer(translation, {
+        voiceId,
+        preferMistral: true,
+      });
+      await writeFile(job.voicePath, voiceBuf);
+    }
+
+    return {
+      ...job,
+      step: "ask_headline",
+      sourceMode: chosen,
+      voicePath: needsVoice ? job.voicePath : null,
+      assPath: ass ? job.assPath : null,
+      mixOriginal,
+      overlayOnly,
+      captionFallback,
+      transcript: sourceText,
+      translation,
+      headline,
+      language,
+    };
+  } catch (error) {
+    await rm(job.workDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+/** Compat: inspecciona y continúa con el mejor modo disponible. */
+export async function prepareTradJob(sourceUrl, { onStatus } = {}) {
+  const inspected = await inspectTradVideo(sourceUrl, { onStatus });
+  const mode =
+    inspected.hasTranscript && !inspected.hasCaption
+      ? "translate_audio"
+      : inspected.hasCaption && !inspected.hasTranscript
+        ? "from_caption"
+        : inspected.hasTranscript
+          ? "translate_audio"
+          : "from_caption";
+  return continueTradJob(inspected, { mode, onStatus });
 }
 
 export async function discardTradJob(job) {

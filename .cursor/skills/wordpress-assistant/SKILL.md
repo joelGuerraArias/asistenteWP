@@ -50,8 +50,10 @@ El bot en `src/telegram-bot.mjs` permite crear posts desde Telegram:
 - `/auto` — sube foto + texto a WordPress
 - `/ia` — conversación con DeepSeek V4
 - `/recortar` — recorta captura de noticia
+- `/pic` — foto + tu texto en lower-third (FV o F1RD, tal cual)
 - `/noticia` o `/ocr` — extrae texto y crea post
 - `/alertas` o `/intrant` — noticias Intrant **solo de hoy** (keyword en título) + Sheet
+- `/reporte` — REPORTE Intrant del día (PDF + correo; cron 07:30)
 - `/copiar` — post formateado para pegar
 - `/mas deportes` — categoría extra
 - `/publicar` y `/borrador` — control del último post

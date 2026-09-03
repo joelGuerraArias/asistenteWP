@@ -12,6 +12,8 @@ test-*.mp4
 .bot.pid
 .last-chat.json
 .feed-repost-sent.json
+.encuestas-sent.json
+.intrant-site-news-seen.json
 logs/
 assets/fonts/cache/
 assets/fonts/fonts.conf

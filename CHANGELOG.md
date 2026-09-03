@@ -2,6 +2,26 @@
 
 La versión vive en `package.json`.
 
+## 2.6.0 — 2026-09-03
+
+### /trad — elegir fuente de voz
+- Tras descargar el video, pregunta: **traducir el audio** o **crear audio desde el caption**
+- Modo caption: **siempre traduce el caption a español** antes del TTS
+- Si solo hay una fuente viable, continúa sin preguntar
+
+### F1RD en español
+- Gráficos (titular de tarjeta) y captions de Formula1RD pasan a **español** (antes inglés)
+
+### /busca y monitor sitio INTRANT
+- `/busca` localiza titulares con Tavily + Brave y arma correo estilizado
+- Cron 08:00 / 18:00 en `intrant.gob.do/noticias`: si hay noticia nueva → mismo flujo `/busca`
+- Destinatarios: correos Intrant + autosemana; CC belgicajr
+
+### REPORTE Intrant y otros
+- REPORTE consolidado a Word (`.docx`) + correo
+- Mejoras `/pic` (destino FV/F1RD + envío)
+- Encuestas y scripts de cron asociados
+
 ## 2.5.0 — 2026-08-23
 
 Publicación automática desde feeds RSS a webhooks de redes (mismo gráfico + caption que al pegar un enlace).
@@ -10,9 +30,8 @@ Publicación automática desde feeds RSS a webhooks de redes (mismo gráfico + c
 
 - Hasta **2 noticias nuevas** por marca y corrida; **nunca repite** (`guid`/`link` en `.feed-repost-sent.json`)
 - **FV Digital:** `https://fvdigital.do/feed` → webhook `fvdigital` (`#fvdigital`)
-- **F1RD:** Motorsport F1 + Híbridos y Eléctricos **intercalados** → webhook `formula1rd` (`#Formula1RD`)
+- **F1RD:** Motorsport F1 → webhook `formula1rd` (`#Formula1RD`)
   - `https://lat.motorsport.com/rss/f1/news/`
-  - `https://www.hibridosyelectricos.com/uploads/feeds/feed_hibridos-y-electricos_es.xml`
 - Genera titular corto + caption con IA, tarjeta social (R2) y envía al webhook
 - Aviso obligatorio en Telegram (con foto de la tarjeta)
 - Gráficos F1RD: logo **Fórmula 1 Al Límite** (alpha), tag **f1mister**, pie **www.formula1rd.com**

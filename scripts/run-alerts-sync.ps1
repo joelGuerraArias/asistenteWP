@@ -21,7 +21,6 @@ if ($edesurOn) {
 & $Node 'scripts/sync-google-alerts.mjs' '--replace' *>> $LogFile 2>&1
 $exit1 = $LASTEXITCODE
 
-# Tras sync: revisar filas del día, abrir URL, borrar si noticia >24h + avisar bot
 & $Node 'scripts/purge-stale-intrant.mjs' *>> $LogFile 2>&1
 $exitPurge = $LASTEXITCODE
 

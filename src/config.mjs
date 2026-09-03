@@ -148,15 +148,21 @@ export const config = {
     f1Url:
       process.env.FEED_REPOST_F1_URL ||
       "https://lat.motorsport.com/rss/f1/news/",
-    f1HibridosUrl:
-      process.env.FEED_REPOST_F1_HIBRIDOS_URL ||
-      "https://www.hibridosyelectricos.com/uploads/feeds/feed_hibridos-y-electricos_es.xml",
     f1Count: Math.max(
       1,
       Math.min(
         10,
         Number(process.env.FEED_REPOST_F1_COUNT || process.env.FEED_REPOST_COUNT || 2)
       )
+    ),
+  },
+  encuestas: {
+    dir: join(root, process.env.ENCUESTAS_DIR || "encuestas"),
+    cronTime: process.env.ENCUESTAS_CRON_TIME || "10:00",
+    checkTime: process.env.ENCUESTAS_CHECK_TIME || "09:00",
+    dailyCount: Math.max(
+      1,
+      Math.min(10, Number(process.env.ENCUESTAS_DAILY_COUNT || 1))
     ),
   },
   r2: {
@@ -187,6 +193,13 @@ export const config = {
     searchDepth: process.env.TAVILY_SEARCH_DEPTH || "advanced",
     maxResults: Math.min(20, Math.max(3, Number(process.env.TAVILY_MAX_RESULTS || 8))),
     timeRange: process.env.TAVILY_TIME_RANGE || "week",
+    get enabled() {
+      return Boolean(this.apiKey);
+    },
+  },
+  /** Brave Search API — /busca (titular → medios + borrador de correo) */
+  brave: {
+    apiKey: process.env.BRAVE_API_KEY || "",
     get enabled() {
       return Boolean(this.apiKey);
     },
@@ -235,6 +248,25 @@ export const config = {
         });
     })(),
   },
+  /** Monitor sala de prensa oficial intrant.gob.do/noticias (08:00 / 18:00) */
+  intrantSiteNews: {
+    url: process.env.INTRANT_SITE_NEWS_URL || "https://intrant.gob.do/noticias/",
+    extraTo: process.env.INTRANT_SITE_NEWS_EXTRA_TO || "autosemana@gmail.com",
+    cronTimes: (() => {
+      const raw = process.env.INTRANT_SITE_NEWS_CRON_TIMES || "08:00,18:00";
+      return String(raw)
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((t) => {
+          const [h, m = "0"] = t.split(":");
+          return {
+            hour: Math.min(23, Math.max(0, Number(h) || 0)),
+            minute: Math.min(59, Math.max(0, Number(m) || 0)),
+          };
+        });
+    })(),
+  },
   googleAlerts: {
     gmail: {
       user: process.env.GMAIL_ALERTS_USER || "autosemana@gmail.com",
@@ -259,7 +291,7 @@ export const config = {
       .map((s) => s.trim())
       .filter(Boolean),
     cronTimes: (() => {
-      const raw = process.env.GOOGLE_ALERTS_CRON_TIMES || "08:30,16:30";
+      const raw = process.env.GOOGLE_ALERTS_CRON_TIMES || "07:00,16:30";
       return String(raw)
         .split(",")
         .map((t) => t.trim())
@@ -275,6 +307,58 @@ export const config = {
           };
         });
     })(),
+  },
+  reporte: {
+    cronTimes: (() => {
+      const raw = process.env.INTRANT_REPORT_CRON_TIMES || process.env.REPORTE_CRON_TIMES || "07:30,17:00";
+      return String(raw)
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((t) => {
+          const [h, m = "0"] = t.split(":");
+          return {
+            hour: Math.min(23, Math.max(0, Number(h) || 0)),
+            minute: Math.min(59, Math.max(0, Number(m) || 0)),
+          };
+        });
+    })(),
+    apifyToken: process.env.APIFY_TOKEN || process.env.APIFY_API_KEY || "",
+    twitterRapidApiKey:
+      process.env.TWITTER_RAPIDAPI_KEY || process.env.RAPIDAPI_KEY || "",
+    twitterRapidApiHost:
+      process.env.TWITTER_RAPIDAPI_HOST || "twitter-api47.p.rapidapi.com",
+    twitterQuery: process.env.INTRANT_TWITTER_QUERY || "@INTRANT_RD",
+    youtubeLastUrl:
+      process.env.INTRANT_YOUTUBE_DATASET_URL ||
+      "https://api.apify.com/v2/actor-tasks/user-gdkwfrm66hg3e4jwd~intrant-youtube-scraper-task/runs/last/dataset/items?status=SUCCEEDED&format=json&clean=true",
+    instagramLastUrl:
+      process.env.INTRANT_IG_DATASET_URL ||
+      "https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs/last/dataset/items?status=SUCCEEDED",
+    instagramRefreshUrl:
+      process.env.INTRANT_IG_REFRESH_URL ||
+      "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items",
+    facebookLastUrl:
+      process.env.INTRANT_FB_DATASET_URL ||
+      "https://api.apify.com/v2/acts/scraper_one~facebook-posts-search/runs/last/dataset/items?status=SUCCEEDED",
+    facebookRefreshUrl:
+      process.env.INTRANT_FB_REFRESH_URL ||
+      "https://api.apify.com/v2/acts/scraper_one~facebook-posts-search/run-sync-get-dataset-items",
+    /** Búsqueda lean: "INTRANT RD" (nunca solo "Intrant" → false positives infant). */
+    facebookQuery: process.env.INTRANT_FB_QUERY || "INTRANT RD",
+    facebookResultsLimit: Math.min(
+      40,
+      Math.max(1, Number(process.env.INTRANT_FB_RESULTS_LIMIT) || 12)
+    ),
+    /** Días atrás para startDate del refresh (default 3). */
+    facebookSearchDays: Math.min(
+      14,
+      Math.max(1, Number(process.env.INTRANT_FB_SEARCH_DAYS) || 3)
+    ),
+    instagramStartUrls: String(process.env.INTRANT_IG_START_URLS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
   },
   electricAlerts: {
     /** false cuando EDESUR_ENABLED=false */
@@ -407,6 +491,8 @@ export const config = {
     width: Number(process.env.TRAD_WIDTH || 1080),
     height: Number(process.env.TRAD_HEIGHT || 1920),
     ffmpegPath: process.env.FFMPEG_PATH || "",
+    /** false = sin PNG de marca encima del reel (solo 9:16 + titular opcional). */
+    overlayEnabled: process.env.TRAD_OVERLAY === "true",
     overlayPath: process.env.TRAD_OVERLAY_PATH || "",
   },
 };

@@ -15,7 +15,10 @@ El usuario usa /ia solo para charlar. La publicación a WordPress es automática
 No hagas análisis largos ni listas de opciones. No preguntes categorías, borrador ni confirmaciones.
 Si preguntan cómo publicar: "Envía el enlace o una captura con /noticia."`;
 
-export async function deepseekChat(messages, { json = false, temperature = 0.75, thinking = null } = {}) {
+export async function deepseekChat(
+  messages,
+  { json = false, temperature = 0.75, thinking = null, system = SYSTEM_PROMPT } = {}
+) {
   if (!config.deepseek.apiKey) {
     throw new Error("Configura DEEPSEEK_API_KEY en .env");
   }
@@ -25,7 +28,7 @@ export async function deepseekChat(messages, { json = false, temperature = 0.75,
 
   const body = {
     model,
-    messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+    messages: [{ role: "system", content: system || SYSTEM_PROMPT }, ...messages],
     temperature,
     thinking: { type: useThinking ? "enabled" : "disabled" },
   };
@@ -199,32 +202,38 @@ const EDITORIAL_HTML_RULES = `FORMATO EDITORIAL FV DIGITAL:
 - NO menciones al medio de origen ni fuentes externas en el cuerpo`;
 
 /**
- * Corrige SOLO ortografía, tildes y puntuación de un titular.
+ * Corrige SOLO ortografía, tildes y puntuación de un titular o caption.
  * Nunca cambia el sentido, el enfoque ni las palabras clave.
  */
 export async function correctHeadlineSpelling(title = "") {
   const input = String(title || "").trim();
   if (!input) return input;
 
-  const prompt = `Corrige SOLO ortografía, tildes, mayúsculas y puntuación de este titular periodístico.
+  const prompt = `Corrige la ortografía de este texto para redes sociales (titular o caption corto).
 
-REGLAS ESTRICTAS:
-- NO cambies el sentido ni la esencia
-- NO añadas ni quites información
-- NO reescribas, no sinónimos, no otro enfoque
-- Conserva nombres propios, siglas, cifras y el orden de las ideas
-- Si ya está correcto, devuélvelo igual
-- Devuelve SOLO el titular corregido, sin comillas ni explicación
+OBLIGATORIO corregir:
+- Tildes y acentos (pais→país, economica→económica, autpista→autopista)
+- Errores de escritura y letras faltantes/sobrantes
+- Mayúsculas al inicio y en nombres propios
+- Puntuación básica
 
-Titular:
+PROHIBIDO:
+- Cambiar el sentido, añadir o quitar información
+- Sinónimos, reescritura, otro enfoque
+- Comillas, explicación o comentarios
+
+Conserva nombres propios, siglas, cifras y el orden de las ideas.
+Devuelve SOLO el texto corregido.
+
+Texto:
 ${input}`;
 
   const { content } = await deepseekChat(
     [{ role: "user", content: prompt }],
-    { temperature: 0.1 }
+    { temperature: 0.05, thinking: false }
   );
 
-  const out = content.trim().replace(/^["']|["']$/g, "");
+  const out = content.trim().replace(/^["'`]|["'`]$/g, "");
   return out || input;
 }
 
@@ -247,6 +256,69 @@ ${input}`;
   );
 
   return content.trim().replace(/^["']|["']$/g, "") || input;
+}
+
+/**
+ * Corrige ortografía/redacción de un texto (para /trad pegado).
+ * No inventa hechos ni cambia el sentido.
+ */
+export async function correctTradText(text = "") {
+  const input = String(text || "").trim();
+  if (!input) return input;
+
+  const prompt = `Corrige ortografía, tildes, mayúsculas, puntuación y redacción menor de este texto.
+
+REGLAS ESTRICTAS:
+- NO cambies el sentido ni inventes información
+- NO añadas hechos nuevos
+- Conserva nombres propios, siglas, cifras y el orden de las ideas
+- Puedes suavizar frases rotas o repeticiones obvias
+- Si ya está correcto, devuélvelo igual
+- Devuelve SOLO el texto corregido, sin comillas ni explicación
+
+Texto:
+${input.slice(0, 8000)}`;
+
+  const { content } = await deepseekChat(
+    [{ role: "user", content: prompt }],
+    { temperature: 0.15 }
+  );
+
+  const out = content.trim().replace(/^["']|["']$/g, "");
+  return out || input;
+}
+
+/**
+ * Enriquece un texto con datos de investigación (Tavily), sin inventar.
+ */
+export async function enrichTradTextWithResearch(text = "", researchBrief = "") {
+  const input = String(text || "").trim();
+  const research = String(researchBrief || "").trim();
+  if (!input) return input;
+  if (!research) return input;
+
+  const prompt = `Mejora y amplía este texto usando SOLO los datos de la investigación adjunta.
+
+REGLAS:
+- Conserva el enfoque y el tono del texto original
+- Incorpora cifras, nombres y hechos verificables de la investigación
+- NO inventes datos que no estén en la investigación ni en el texto
+- Español claro (República Dominicana)
+- Devuelve SOLO el texto final, sin comillas ni explicación
+
+Texto original:
+${input.slice(0, 5000)}
+
+Investigación:
+${research.slice(0, 7000)}`;
+
+  const { content } = await deepseekChat(
+    [{ role: "user", content: prompt }],
+    { temperature: 0.25 }
+  );
+
+  const out = content.trim().replace(/^["']|["']$/g, "");
+  return out || input;
 }
 
 export async function formatNewsBodyHtml({ text, title, topic = "" }) {
@@ -519,61 +591,82 @@ Devuelve solo el titular.`;
   return fallback();
 }
 
-export async function composeCardHeadline(title, bodyText = "", { maxChars = 62 } = {}) {
+/**
+ * Titular SOLO para tarjeta de redes (WP no usa esto).
+ * - lang "es" (default): ≤12 palabras en español (IA si hace falta)
+ * - lang "en": siempre inglés, máx. 12 palabras (F1RD)
+ */
+export async function composeCardHeadline(title, bodyText = "", { lang = "es" } = {}) {
   const clean = (txt) =>
     String(txt || "")
       .replace(/https?:\/\/\S+/g, "")
+      .replace(/#[\p{L}\d_.]+/gu, "")
       .replace(/\s+/g, " ")
       .trim();
 
   const source = clean(title);
+  const isEn = String(lang).toLowerCase().startsWith("en");
+  if (!source) return isEn ? "News" : clean(bodyText).slice(0, 120) || "Noticia";
 
-  // Si el titular ya es corto, se usa tal cual.
-  if (source && source.length <= maxChars) return source;
+  const words = source.split(/\s+/).filter(Boolean);
+  // Español corto: se deja. Inglés: siempre pasa por IA (puede venir en ES del feed).
+  if (!isEn && words.length <= 12) return source;
 
-  const fallback = () => {
-    // Recorta por palabras sin cortar a la mitad ni dejar puntos suspensivos.
-    const words = source.split(" ");
-    let out = "";
-    for (const w of words) {
-      if ((out ? `${out} ${w}` : w).length > maxChars) break;
-      out = out ? `${out} ${w}` : w;
-    }
-    return (out || source.slice(0, maxChars)).replace(/[\s,;:.]+$/, "");
-  };
+  const fallback = () => words.slice(0, 12).join(" ");
 
   try {
-    const prompt = `Reescribe este titular para una TARJETA gráfica de redes. Debe ser una idea CONCRETA y completa que quepa en 2 líneas.
+    const prompt = isEn
+      ? `Rewrite this headline for a social MEDIA CARD (max 2 lines).
+Strict rules:
+- English only, MAXIMUM 12 words (exact count).
+- One concrete complete idea (who/what happened).
+- NO ellipsis, NO quotes, NO hashtags.
+- Do not end on a preposition or conjunction (of, the, a, an, in, on, for, and, or, to).
+- Keep key proper names (drivers, teams, races).
+
+Original (${words.length} words): "${source}"
+${bodyText ? `Context: ${clean(bodyText).slice(0, 350)}` : ""}
+
+Return ONLY the rewritten English headline (≤12 words).`
+      : `Reescribe este titular para una TARJETA de redes (2 líneas máx).
 Reglas estrictas:
-- Español, máximo ${maxChars} caracteres.
-- Una sola frase con sentido completo (sujeto + qué pasó).
-- SIN puntos suspensivos, SIN cortar la idea, SIN comillas.
-- No termines en preposición ni conjunción.
+- Español, MÁXIMO 12 palabras (cuenta exacta).
+- Una idea concreta y completa (sujeto + qué pasó).
+- SIN puntos suspensivos, SIN comillas, SIN hashtags.
+- No termines en preposición ni conjunción (de, del, la, el, en, con, para, por, y, o, a).
 - Conserva nombres propios clave.
 
-Titular original: "${source}"
-${bodyText ? `Contexto: ${clean(bodyText).slice(0, 400)}` : ""}
+Titular original (${words.length} palabras): "${source}"
+${bodyText ? `Contexto: ${clean(bodyText).slice(0, 350)}` : ""}
 
-Devuelve solo el titular reescrito.`;
+Devuelve SOLO el titular reescrito (≤12 palabras).`;
 
     const { content } = await deepseekChat(
       [{ role: "user", content: prompt }],
-      { temperature: 0.4 }
+      { temperature: 0.35 }
     );
 
-    let headline = clean(content).replace(/^["'`]|["'`]$/g, "").replace(/[.]+$/, "").trim();
-
-    if (headline && headline.length <= maxChars + 6 && !/\.\.\.|…$/.test(headline)) {
+    let headline = clean(content)
+      .replace(/^["'`]|["'`]$/g, "")
+      .replace(/[.]+$/, "")
+      .trim();
+    const hw = headline.split(/\s+/).filter(Boolean);
+    if (headline && hw.length >= 3 && hw.length <= 12 && !/\.\.\.|…$/.test(headline)) {
       return headline;
     }
+    if (hw.length > 12) return hw.slice(0, 12).join(" ");
   } catch {
-    // usa fallback
+    // fallback
   }
 
   return fallback();
 }
 
-export async function generateSocialCaption(title, bodyText = "", { hashtag = "#fvdigital" } = {}) {
+export async function generateSocialCaption(
+  title,
+  bodyText = "",
+  { hashtag = "#fvdigital", lang = "es" } = {}
+) {
   // Limpia URLs/hashtags/menciones pero CONSERVA los saltos de párrafo.
   const cleanKeepBreaks = (txt) =>
     String(txt || "")
@@ -591,13 +684,36 @@ export async function generateSocialCaption(title, bodyText = "", { hashtag = "#
       .replace(/\s+/g, " ")
       .trim();
 
+  const isEn = String(lang).toLowerCase().startsWith("en");
+
   const fallback = () => {
     const base = cleanInline(bodyText).slice(0, 400) || cleanInline(title);
     return `${base}\n\n${hashtag}`.trim();
   };
 
   try {
-    const prompt = `Escribe el texto (caption) para acompañar una publicación de redes sociales (Instagram/Facebook) sobre esta noticia dominicana.
+    const prompt = isEn
+      ? `Write the social caption (Instagram/Facebook) for this Formula 1 / motorsport post.
+Rules:
+- English only, journalistic but engaging tone.
+- Length: 2 or 3 short paragraphs (about 350–700 characters total).
+- Separate paragraphs with a blank line.
+- MUST mention proper names from the text (drivers, teams, circuits, events) and concrete places.
+- Include specific data present in the text: numbers, dates, results.
+- Summarize what happened, who is involved (by name), where, and why it matters.
+- Do NOT copy the headline as the first line; start with a concrete hook.
+- Do NOT invent facts, names, or places not in the text.
+- Do NOT include links, URLs, or hashtags (hashtag is added separately).
+- At most one emoji if it helps.
+
+Headline: "${title}"
+Article / source text:
+---
+${cleanInline(bodyText).slice(0, 3000)}
+---
+
+Return only the caption.`
+      : `Escribe el texto (caption) para acompañar una publicación de redes sociales (Instagram/Facebook) sobre esta noticia (si es Fórmula 1 / motorsport, escribe en español con tono aficionado a F1).
 Reglas:
 - Español, tono periodístico cercano.
 - Extensión: 2 o 3 párrafos cortos (entre 350 y 700 caracteres en total).

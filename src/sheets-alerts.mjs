@@ -409,10 +409,8 @@ export function alertToIntrantRow(a) {
     .toLowerCase();
   const periodista = String(a.periodista || "").trim() || "Redacción";
   const url = String(a.url || "").trim() || "https://example.com/sin-url";
-  const urlFecha = normalizeFechaDdMmYyyy(
-    formatFechaSheet(a.publishedAt || a.receivedAt),
-    url
-  );
+  const [y, m, day] = todayYmd().split("-");
+  const urlFecha = `${day}/${m}/${y}`;
   return [
     urlFecha,
     periodista,

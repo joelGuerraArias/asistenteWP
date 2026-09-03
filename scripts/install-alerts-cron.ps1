@@ -12,7 +12,7 @@ if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 }
 
-$timesRaw = "08:30,16:30"
+$timesRaw = "07:00,16:30"
 $envPath = Join-Path $Root ".env"
 if (Test-Path $envPath) {
     foreach ($line in Get-Content $envPath) {
@@ -34,7 +34,7 @@ foreach ($t in ($timesRaw -split ",")) {
 
 if ($times.Count -lt 1) {
     $times = @((Get-Date -Hour 8 -Minute 30 -Second 0), (Get-Date -Hour 16 -Minute 30 -Second 0))
-    $timesRaw = "08:30,16:30"
+    $timesRaw = "07:00,16:30"
 }
 
 $wrapper = Join-Path $PSScriptRoot "run-alerts-sync.ps1"

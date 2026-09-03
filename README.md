@@ -382,6 +382,11 @@ AsistenteWP/
 | `npm run feed:repost` | Publicar feeds FV + F1RD ahora |
 | `npm run feed:repost:f1` | Solo feed Formula1RD |
 | `npm run feed:repost:cron:install` | Cron feed 09:15–21:15 |
+| `npm run encuestas` | Publicar encuestas pendientes (TXT+fotos) → WP + FV |
+| `npm run encuestas:dry` | Simular encuestas sin publicar |
+| `npm run encuestas:check` | Check foto de la próxima (como cron 9:00) |
+| `npm run encuestas:cron:install` | Cron check 09:00 + publicar 10:00 |
+| `npm run encuestas:cron:uninstall` | Quitar crons de encuestas |
 
 ---
 

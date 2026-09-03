@@ -9,19 +9,22 @@ import {
   cleanupTemp,
   downloadTelegramFile,
   getSpeechProviderLabel,
+  mp3ToVoiceOgg,
   readTempFile,
   synthesizeSpeech,
   transcribeAudio,
 } from "./audio.mjs";
-import { askDeepseek, buildNewsPostFromOcr, buildNoteFromDocument, composeCardHeadline, correctHeadlineSpelling, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
+import { askDeepseek, buildNewsPostFromOcr, buildNoteFromDocument, composeCardHeadline, correctHeadlineSpelling, correctTradText, enrichTradTextWithResearch, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
 import { generateNewsCard, fetchImageBuffer, LOGO_F1RD_PATH } from "./social-card.mjs";
 import {
   publishToDestinations,
+  publishToWebhook,
   isF1ChoiceUrl,
   destIncludesFv,
   destLabel,
-  destPrimaryHashtag,
   assertDestWebhooksReady,
+  captionForTarget,
+  webhookTargets,
 } from "./publish-webhook.mjs";
 import { isPublicR2Url, uploadToR2 } from "./r2.mjs";
 import { extractFirstUrl, extractUrlFromMessage, fetchArticleFromUrl, detectSocialPlatform, socialPlatformLabel } from "./news-fetch.mjs";
@@ -68,6 +71,7 @@ import {
   renderRemotionVideo,
 } from "./video-tools.mjs";
 import { parseVideoIntent } from "./video-intent.mjs";
+import { resolveCommandIntent } from "./command-intent.mjs";
 import { createVideoJob, createThrottledProgress } from "./video-progress.mjs";
 import {
   emptyHyperFlow,
@@ -96,8 +100,10 @@ import {
 import {
   discardTradJob,
   finalizeTradJob,
-  prepareTradJob,
+  inspectTradVideo,
+  continueTradJob,
 } from "./trad-video.mjs";
+import { isTavilyEnabled, tavilyResearchTopic } from "./tavily.mjs";
 import {
   cancelTermometroFlow,
   emptyTermometroFlow,
@@ -109,6 +115,32 @@ import {
   termometroCancelText,
   termometroIntroText,
 } from "./termometro-flow.mjs";
+import {
+  cancelPicFlow,
+  emptyPicFlow,
+  advancePicAfterPhoto,
+  handlePicText,
+  handlePicDestText,
+  isPicFlowActive,
+  picAwaitingDest,
+  picAwaitingConfirm,
+  picAwaitingPhoto,
+  picAwaitingTitle,
+  picCancelText,
+  headlineWasCorrected,
+  picAskDestText,
+  picPreviewReadyText,
+  picIntroText,
+  setPicPhoto,
+} from "./pic-flow.mjs";
+import {
+  formatReporteTelegram,
+  runIntrantReport,
+} from "./intrant-report.mjs";
+import {
+  formatBuscaTelegram,
+  searchHeadlineSources,
+} from "./headline-search.mjs";
 import {
   cleanupTermometroWorkDir,
   generateTermometroVideo,
@@ -122,6 +154,7 @@ function getSession(chatId) {
       mode: config.telegram.echoOnly ? "echo" : "auto",
       photoIntent: null,
       voiceReplies: config.audio.voiceReplies,
+      fromVoice: false,
       chatHistory: [],
       buffer: {
         photos: [],
@@ -145,7 +178,9 @@ function getSession(chatId) {
       pendingDestChoice: null,
       publishDest: "fvdigital",
       pendingTradJob: null,
+      pendingTradText: null,
       termometroFlow: null,
+      picFlow: null,
     });
   }
   return sessions.get(chatId);
@@ -166,30 +201,51 @@ function helpText() {
     ].join("\n");
   }
   return [
-    "JARVIS — FV Digital",
+    "JARVIS — comandos",
     "",
-    "Publicación directa:",
+    "Ayuda:",
+    "• /ayuda · /help · /comandos — esta lista",
+    "",
+    "Publicar noticias:",
     "• Enlace de noticia → titular, foto y texto a WP",
     "• Enlace YT/IG/FB/Dailymotion → destino (FV / F1RD / ambos), luego Video o Noticia",
     "• /escribir — redactar noticia (elige entre 3 titulares)",
-    "• /periodista — tu titular (solo corrige ortografía) → tema → foto → WP + redes",
+    "• /periodista — tu titular → tema → foto → WP + redes",
     "• /wp — artículo guiado: tema → borrador → foto → publicar",
-    "• /noticia o /ocr — captura de pantalla (elige foto destacada antes de publicar)",
-    "• /nota — documento PDF o foto del documento → extrae info y pide/saca foto",
-    "• /auto — foto + texto",
+    "• /noticia · /ocr — captura de pantalla → WP",
+    "• /nota — PDF o foto de documento → extrae info + foto",
+    "• /auto — modo foto + texto",
+    "• /encuestas — 1 encuesta pendiente → WP + redes FV",
     "• /publicar — publicar el último borrador",
+    "• /borrador — listar borradores",
+    "• /ver · /verpost — ver un post",
+    "• /editar — editar post",
+    "• /borrar — borrar post",
+    "• /cancelar — cancelar flujo en curso",
     "",
-    "/cancelar — cancelar redacción, /foto o modo /hyper en curso",
-    "/ia — modo conversación (opcional)",
+    "Video / redes:",
+    "• /video URL — descarga → R2 → webhook (destino FV/F1RD/ambos)",
+    "• /trad URL — elige: traducir audio o audio desde caption (ES) → webhook",
+    "• /trad + texto — corregir / traducir / buscar (Tavily) / audio",
+    "• /foto — Termómetro (nombre + institución + foto)",
+    "• /pic — foto + texto → vista previa → confirmar (FV o F1RD)",
+    "• /hyper · /hyperframes — HyperFrames (generar / verificar)",
+    "• /heygen — video HeyGen",
+    "• /remotion — listar composiciones Remotion",
+    "• /videostatus — estado de herramientas de video",
     "",
-    "Video:",
-    "• /video URL — destino FV/F1RD/ambos si aplica, luego descarga → R2 → webhook",
-    "• /trad URL — destino si aplica; si no es ES: doblaje; si ya es ES: overlay 9:16 → webhook",
-    "• /foto — video Termómetro: nombre + institución + foto del funcionario",
-    "• /hyper — diálogo guiado HyperFrames (generar o verificar)",
-    "«genera un video con heygen» · /heygen /remotion · /videostatus",
-    "",
-    "Otros: /alertas /alertas-electricas /recortar /borrador /ver /editar /borrar /estado",
+    "Otros:",
+    "• /busca [titular] — Tavily + Brave → medios + borrador de correo",
+    "• /reporte — REPORTE Intrant (Word + correo)",
+    "• /alertas · /intrant — sync alertas Intrant",
+    "• /alertas-electricas · /edesur — alertas eléctricas",
+    "• /recortar — recortar imagen",
+    "• /ia — modo conversación",
+    "• /echo — solo eco (sin publicar)",
+    "• /estado — estado del bot / sesión",
+    "• /voz · /escuchar — respuestas por voz",
+    "• Órdenes por voz — ej. «crea una noticia sobre…», «hazme una imagen», «video heygen»",
+    "• /mas — categorías extra al publicar",
   ].join("\n");
 }
 
@@ -251,29 +307,42 @@ function splitTelegramChunks(text, max = TELEGRAM_TEXT_MAX) {
   return parts.length ? parts : [""];
 }
 
-async function reply(ctx, text, { voice = null } = {}) {
+async function reply(ctx, text, { voice = null, ...telegramOpts } = {}) {
   const chunks = splitTelegramChunks(text);
-  for (const chunk of chunks) {
-    await ctx.reply(chunk);
+  for (let i = 0; i < chunks.length; i++) {
+    const opts = i === chunks.length - 1 ? telegramOpts : {};
+    await ctx.reply(chunks[i], opts);
   }
   const session = getSession(ctx.chat.id);
   if (isEchoMode(session)) return;
-  const useVoice = voice ?? session.voiceReplies;
+  // Si el usuario habló por audio, siempre responder en audio (salvo voice: false explícito).
+  const useVoice = voice ?? (session.fromVoice || session.voiceReplies);
   if (!useVoice || !chunks[0]) return;
 
   let audioPath;
+  let voicePath;
   try {
     const spoken = chunks[0];
     const short = spoken.length > 220 ? `${spoken.slice(0, 217)}...` : spoken;
     audioPath = await synthesizeSpeech(short);
-    const audioBuffer = await readTempFile(audioPath);
-    await ctx.replyWithAudio(Input.fromBuffer(audioBuffer, "respuesta.mp3"), {
-      title: "JARVIS",
-    });
+    // Nota de voz (burbuja) — evita el player con carátula tipo "Rock…"
+    try {
+      voicePath = await mp3ToVoiceOgg(audioPath);
+      const voiceBuffer = await readTempFile(voicePath);
+      await ctx.replyWithVoice(Input.fromBuffer(voiceBuffer, "respuesta.ogg"));
+    } catch (convErr) {
+      console.warn("Voz OGG falló, envío MP3 sin título:", convErr.message);
+      const audioBuffer = await readTempFile(audioPath);
+      await ctx.replyWithAudio(Input.fromBuffer(audioBuffer, "jarvis.mp3"), {
+        title: "JARVIS",
+        performer: "FV Digital",
+      });
+    }
   } catch (error) {
     console.warn("TTS falló:", error.message);
   } finally {
     cleanupTemp(audioPath);
+    cleanupTemp(voicePath);
   }
 }
 
@@ -307,7 +376,7 @@ function timeGreeting() {
 
 async function handleCasualChat(ctx, text) {
   if (isHelpMessage(text)) {
-    await ctx.reply(helpText());
+    await reply(ctx, helpText());
     return;
   }
 
@@ -315,7 +384,8 @@ async function handleCasualChat(ctx, text) {
   const opener = pickJarvisOpener(session.jarvisRecentOpeners);
   session.jarvisRecentOpeners = [...session.jarvisRecentOpeners, opener.id].slice(-12);
 
-  await ctx.reply(
+  await reply(
+    ctx,
     [
       `${timeGreeting()}. Soy JARVIS, su asistente editorial de FV Digital.`,
       "",
@@ -386,6 +456,208 @@ function htmlToPlainText(html = "") {
     .slice(0, 1200);
 }
 
+function cardOptsForDest(dest) {
+  if (dest === "f1rd") {
+    return {
+      logoPath: LOGO_F1RD_PATH,
+      badgeText: "f1mister",
+      handle: config.f1rdWebhook?.hashtag || "#Formula1RD",
+      site: "www.formula1rd.com",
+      logoWidthRatio: 0.2,
+    };
+  }
+  return {};
+}
+
+function picDestKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("FV Digital", "pic:fvdigital"),
+      Markup.button.callback("F1RD", "pic:f1rd"),
+    ],
+    [Markup.button.callback("❌ Cancelar", "pic:cancel")],
+  ]);
+}
+
+function picConfirmKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Enviar", "pic:done")],
+    [
+      Markup.button.callback("🔄 Otra marca", "pic:change"),
+      Markup.button.callback("❌ Cancelar", "pic:cancel"),
+    ],
+  ]);
+}
+
+async function correctPicHeadline(ctx, rawText) {
+  const original = String(rawText || "").trim();
+  if (!original) return { original: "", corrected: "", changed: false, failed: false };
+
+  await status(ctx, "📝 Corrigiendo ortografía…");
+  try {
+    const corrected = (await correctHeadlineSpelling(original)).trim() || original;
+    return {
+      original,
+      corrected,
+      changed: headlineWasCorrected(original, corrected),
+      failed: false,
+    };
+  } catch (error) {
+    console.warn("correctPicHeadline:", error.message);
+    await reply(
+      ctx,
+      `⚠️ No pude corregir ortografía (${error.message}). Uso tu texto original.`,
+      { voice: false }
+    );
+    return { original, corrected: original, changed: false, failed: true };
+  }
+}
+
+async function preparePicDestStep(ctx, session) {
+  const flow = session.picFlow;
+  if (!flow?.headline?.trim()) return;
+
+  const { original, corrected, changed } = await correctPicHeadline(
+    ctx,
+    flow.headline
+  );
+  flow.originalHeadline = original;
+  flow.headline = corrected;
+  flow.step = "awaiting_dest";
+  flow.spellingApplied = true;
+
+  const spellNote = changed
+    ? `\n\n✏️ Ortografía corregida:\nAntes: ${original}\nAhora: ${corrected}`
+    : "";
+
+  const text = picAskDestText(corrected) + spellNote;
+  // Keyboard explícito (no mezclar con voice opts del helper reply)
+  await ctx.reply(text, picDestKeyboard());
+}
+
+async function handlePicFlowText(ctx, trimmed) {
+  const session = getSession(ctx.chat.id);
+  if (!isPicFlowActive(session)) return false;
+
+  if (picAwaitingDest(session)) {
+    const destPick = handlePicDestText(session, trimmed);
+    if (destPick.dest) {
+      await showPicPreview(ctx, destPick.dest);
+      return true;
+    }
+    await ctx.reply(
+      destPick.reply || "Elige FV Digital o F1RD con los botones, o escribe «fv» o «f1rd».",
+      picDestKeyboard()
+    );
+    return true;
+  }
+
+  const handled = handlePicText(session, trimmed);
+  if (handled.handled) {
+    if (handled.readyForDest) {
+      await preparePicDestStep(ctx, session);
+    } else {
+      await reply(ctx, handled.reply, { voice: false });
+    }
+    return true;
+  }
+
+  if (picAwaitingConfirm(session)) {
+    await ctx.reply(
+      "Usa los botones bajo la vista previa: ✅ Enviar, 🔄 Otra marca o ❌ Cancelar.",
+      picConfirmKeyboard()
+    );
+    return true;
+  }
+
+  if (picAwaitingPhoto(session) || picAwaitingTitle(session)) {
+    await reply(ctx, "Envía la foto o escribe el texto para el lower-third.", {
+      voice: false,
+    });
+    return true;
+  }
+
+  return false;
+}
+
+async function handlePicPhoto(ctx, imageBuffer, mimeType, caption = "") {
+  const session = getSession(ctx.chat.id);
+  const flow = session.picFlow;
+  if (!flow) return;
+
+  setPicPhoto(session, imageBuffer, mimeType);
+
+  const next = advancePicAfterPhoto(session, caption);
+  if (!next) {
+    await ctx.reply("❌ /pic: no pude guardar la foto.", { voice: false });
+    cancelPicFlow(session);
+    return;
+  }
+
+  if (next.readyForDest) {
+    await preparePicDestStep(ctx, session);
+    return;
+  }
+
+  await ctx.reply(next.reply, { voice: false });
+}
+
+async function showPicPreview(ctx, dest) {
+  const session = getSession(ctx.chat.id);
+  const flow = session.picFlow;
+  if (!flow?.photoBuffer || !flow.headline) {
+    await reply(ctx, "No hay foto o titular pendiente. Usa /pic de nuevo.", {
+      voice: false,
+    });
+    return;
+  }
+
+  try {
+    await ctx.sendChatAction("upload_photo").catch(() => {});
+
+    const rawTitle = flow.headline.trim();
+    const originalHeadline = flow.originalHeadline?.trim() || rawTitle;
+    let cardTitle = rawTitle;
+
+    if (!flow.spellingApplied) {
+      const spell = await correctPicHeadline(ctx, rawTitle);
+      cardTitle = spell.corrected;
+      flow.headline = cardTitle;
+      flow.originalHeadline = spell.original;
+      flow.spellingApplied = true;
+    }
+
+    const card = await generateNewsCard({
+      backgroundBuffer: flow.photoBuffer,
+      title: cardTitle,
+      ...cardOptsForDest(dest),
+    });
+
+    flow.dest = dest;
+    flow.previewCard = card;
+    flow.step = "awaiting_confirm";
+
+    const spellNote = headlineWasCorrected(originalHeadline, cardTitle)
+      ? `\n\nTexto corregido:\n${cardTitle}`
+      : "";
+
+    await ctx.replyWithPhoto(Input.fromBuffer(card, "pic-preview.png"), {
+      caption: `Vista previa · ${destLabel(dest)}${spellNote}`,
+      ...picConfirmKeyboard(),
+    });
+
+    await ctx.reply(picPreviewReadyText(destLabel(dest)), picConfirmKeyboard());
+  } catch (error) {
+    console.error("showPicPreview:", error);
+    cancelPicFlow(session);
+    await ctx.reply(`❌ /pic: ${error.message}`, { voice: false });
+  }
+}
+
+function socialLangForTarget(_target) {
+  return "es";
+}
+
 async function sendSocialCard(ctx, { title, imageBuffer = null, imageUrl = null, bodyText = "" }) {
   if (!config.socialCard.enabled) return;
   if (!title) return;
@@ -406,29 +678,30 @@ async function sendSocialCard(ctx, { title, imageBuffer = null, imageUrl = null,
       at: new Date().toISOString(),
     };
 
-    const cardTitle = await composeCardHeadline(title, bodyText).catch(() => title);
     const dest = session.publishDest || "fvdigital";
-    const cardOpts =
-      dest === "f1rd"
-        ? {
-            logoPath: LOGO_F1RD_PATH,
-            badgeText: "f1mister",
-            handle: config.f1rdWebhook?.hashtag || "#Formula1RD",
-            site: "www.formula1rd.com",
-            logoWidthRatio: 0.2,
-          }
-        : {};
+    // Preview: siempre español (FV y F1RD).
+    const previewLang = "es";
+    const previewTarget = dest === "f1rd" ? "f1rd" : "fvdigital";
+    const cardTitle = await composeCardHeadline(title, bodyText, {
+      lang: previewLang,
+    }).catch(() => title);
     const card = await generateNewsCard({
       backgroundBuffer: bg,
       title: cardTitle,
-      ...cardOpts,
+      ...cardOptsForDest(previewTarget),
     });
 
     await ctx.replyWithPhoto(Input.fromBuffer(card, "fv-card.png"), {
-      caption: `Gráfico para redes (${destLabel(dest)})`,
+      caption: `Gráfico para redes (${destLabel(dest)}${
+        dest === "f1rd" ? " · F1RD" : ""
+      })`,
     });
 
-    await sendCardToWebhook(ctx, { card, title, bodyText });
+    await sendCardToWebhook(ctx, {
+      title,
+      bodyText,
+      imageBuffer: bg,
+    });
   } catch (error) {
     console.warn("sendSocialCard:", error.message);
   }
@@ -448,7 +721,7 @@ async function uploadCardPublicUrl(card, title) {
   return media?.source_url || null;
 }
 
-async function sendCardToWebhook(ctx, { card, title, bodyText = "" }) {
+async function sendCardToWebhook(ctx, { card = null, title, bodyText = "", imageBuffer = null }) {
   const session = getSession(ctx.chat.id);
   const dest = session.publishDest || "fvdigital";
   if (destIncludesFv(dest) && !config.publishWebhook?.enabled) {
@@ -456,29 +729,68 @@ async function sendCardToWebhook(ctx, { card, title, bodyText = "" }) {
   }
 
   try {
-    const publicUrl = await uploadCardPublicUrl(card, title);
-    if (!publicUrl) {
-      await ctx.reply("⚠️ No obtuve URL pública de la tarjeta; no la envié al webhook.");
-      return;
+    let bg = imageBuffer;
+    if (!bg && card) {
+      // compat: si solo viene el PNG ya renderizado, úsalo solo para un target
+      bg = null;
     }
 
-    const seedTag = destPrimaryHashtag(dest);
-    const captionSeed = await generateSocialCaption(title, bodyText, {
-      hashtag: seedTag,
-    }).catch(() => `${title} ${seedTag}`.trim());
+    const targets = webhookTargets(dest);
+    const results = [];
+    let lastCaption = "";
 
-    const results = await publishToDestinations(dest, {
-      caption: captionSeed,
-      title,
-      imageUrl: publicUrl,
-      mediaType: "IMAGE",
-    });
-    const caption = results.find((r) => r.caption)?.caption || captionSeed;
-    session.lastVideo = {
-      title,
-      caption,
-      at: new Date().toISOString(),
-    };
+    for (const target of targets) {
+      const lang = socialLangForTarget(target);
+      const hashtag =
+        target === "f1rd"
+          ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+          : config.publishWebhook?.hashtag || "#fvdigital";
+
+      const cardTitle = await composeCardHeadline(title, bodyText, { lang }).catch(
+        () => title
+      );
+      const captionSeed = await generateSocialCaption(title, bodyText, {
+        hashtag,
+        lang,
+      }).catch(() => `${title}\n\n${hashtag}`.trim());
+
+      let outCard = card;
+      if (bg) {
+        outCard = await generateNewsCard({
+          backgroundBuffer: bg,
+          title: cardTitle,
+          ...cardOptsForDest(target),
+        });
+      } else if (!outCard) {
+        results.push({ ok: false, target, error: "sin imagen para la tarjeta" });
+        continue;
+      }
+
+      const publicUrl = await uploadCardPublicUrl(outCard, cardTitle);
+      if (!publicUrl) {
+        results.push({ ok: false, target, error: "sin URL pública de tarjeta" });
+        continue;
+      }
+
+      const published = await publishToWebhook({
+        caption: captionSeed,
+        title: cardTitle,
+        imageUrl: publicUrl,
+        mediaType: "IMAGE",
+        target,
+      });
+      results.push(published);
+      if (published.ok) lastCaption = published.caption || captionSeed;
+      if (published.ok) {
+        session.lastVideo = {
+          ...(session.lastVideo || {}),
+          title: cardTitle,
+          caption: lastCaption,
+          imageUrl: publicUrl,
+          at: new Date().toISOString(),
+        };
+      }
+    }
 
     const failed = results.filter((r) => !r.ok);
     const ok = results.filter((r) => r.ok);
@@ -487,8 +799,7 @@ async function sendCardToWebhook(ctx, { card, title, bodyText = "" }) {
       const note = queued
         ? `Encolado en n8n (${destLabel(dest)}).`
         : `Enviado a ${destLabel(dest)}.`;
-      await ctx.reply(`${note}\n\n${caption}`);
-      session.lastVideo.imageUrl = publicUrl;
+      await ctx.reply(`${note}\n\n${lastCaption}`);
     }
     if (failed.length) {
       await ctx.reply(
@@ -617,10 +928,19 @@ function socialVideoConfirmKeyboard() {
 }
 
 function ensureCaptionHashtag(caption = "", dest = "fvdigital") {
-  const hashtag = destPrimaryHashtag(dest);
-  const base = String(caption || "").trim();
-  if (!base) return hashtag;
-  return base.includes(hashtag) ? base : `${base}\n\n${hashtag}`.trim();
+  if (dest === "both") {
+    let base = String(caption || "")
+      .replace(/#fvdigital(?:\.do)?/gi, "")
+      .replace(/#formula1rd\b/gi, "")
+      .replace(/#f1rd\b/gi, "")
+      .trim();
+    const fv = config.publishWebhook?.hashtag || "#fvdigital";
+    const f1 = config.f1rdWebhook?.hashtag || "#Formula1RD";
+    if (!base) return `${fv}\n\n${f1}`;
+    return `${base}\n\n${fv}\n${f1}`.trim();
+  }
+  // n8n Formula1RD exige #Formula1RD en el caption o no publica.
+  return captionForTarget(caption, dest === "f1rd" ? "f1rd" : "fvdigital");
 }
 
 async function askSocialVideoConfirm(ctx, pending) {
@@ -631,7 +951,7 @@ async function askSocialVideoConfirm(ctx, pending) {
     isTrad && pending.captionFallback
       ? `🎬 Reel listo (9:16 · ${label} · ${mb} MB · voz desde caption${pending.includeHeadline === false ? " · sin titular" : ""})`
       : isTrad && pending.overlayOnly
-      ? `🎬 Reel listo (9:16 · ${label} · ${mb} MB · ya en español, solo overlay${pending.includeHeadline === false ? " · sin titular" : ""})`
+      ? `🎬 Reel listo (9:16 · ${label} · ${mb} MB · ya en español${pending.includeHeadline === false ? " · sin titular" : ""})`
       : isTrad
         ? `🎬 Reel traducido listo (9:16 · ${label} · ${mb} MB · doblaje pabmatos${pending.includeHeadline === false ? " · sin titular" : ""})`
         : `🎬 Video listo (${label} · ${mb} MB)`,
@@ -689,7 +1009,10 @@ async function processSocialVideoUrl(ctx, sourceUrl) {
   }
 
   await reply(ctx, "✍️ Generando caption con IA…", { voice: false });
-  const hashtag = destPrimaryHashtag(dest);
+  const hashtag =
+    dest === "f1rd"
+      ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+      : config.publishWebhook?.hashtag || "#fvdigital";
   const rawCaption = await generateSocialCaption(
     downloaded.title,
     downloaded.description || downloaded.title,
@@ -728,21 +1051,256 @@ function tradHeadlineKeyboard() {
   ]);
 }
 
+function tradSourceModeKeyboard(job) {
+  const rows = [];
+  if (job?.hasTranscript) {
+    rows.push([
+      Markup.button.callback("🌐 Traducir el audio", "trad:source:audio"),
+    ]);
+  }
+  if (job?.hasCaption) {
+    rows.push([
+      Markup.button.callback(
+        "📝 Crear audio desde el caption",
+        "trad:source:caption"
+      ),
+    ]);
+  }
+  rows.push([Markup.button.callback("❌ Cancelar", "trad:source:cancel")]);
+  return Markup.inlineKeyboard(rows);
+}
+
+async function askTradSourceMode(ctx, job) {
+  const lines = [
+    "🎙️ Video listo. ¿Cómo genero la voz?",
+    "",
+    job.hasTranscript
+      ? "• Traducir el audio — tomo lo que se dice, lo paso a español y doblo"
+      : "• (Sin audio usable para traducir)",
+    job.hasCaption
+      ? "• Crear audio desde el caption — traduzco el caption a español y genero la narración"
+      : "• (Sin caption/descripción)",
+    "",
+    "Elige una opción:",
+  ];
+  await ctx.reply(lines.join("\n"), tradSourceModeKeyboard(job));
+}
+
 async function askTradHeadlineConfirm(ctx, job) {
   const text = [
     "📰 Titular propuesto:",
     `«${job.headline || "(sin titular)"}»`,
     "",
     job.overlayOnly
-      ? "El video ya está en español (solo overlay)."
-      : job.captionFallback
-        ? "Voz generada desde el caption."
-        : "Incluye doblaje pabmatos.",
+      ? "El video ya está en español (solo reel 9:16)."
+      : job.captionFallback || job.sourceMode === "from_caption"
+        ? "Voz generada desde el caption (traducido a español)."
+        : "Incluye doblaje pabmatos desde el audio.",
     "",
     "¿Pongo este titular sobre el video?",
   ].join("\n");
 
   await ctx.reply(text, tradHeadlineKeyboard());
+}
+
+function tradTextKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("✍️ Corregir", "trad:text:correct"),
+      Markup.button.callback("🌐 Traducir", "trad:text:translate"),
+    ],
+    [
+      Markup.button.callback("🔍 Buscar", "trad:text:search"),
+      Markup.button.callback("🔊 Audio", "trad:text:audio"),
+    ],
+    [Markup.button.callback("❌ Cancelar", "trad:text:cancel")],
+  ]);
+}
+
+function tradTextAudioConfirmKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Generar audio con este texto", "trad:text:audio_yes")],
+    [Markup.button.callback("✏️ Cambiar texto", "trad:text:audio_edit")],
+    [Markup.button.callback("⬅️ Volver", "trad:text:audio_back")],
+  ]);
+}
+
+function startTradTextFlow(ctx, rawText) {
+  const session = getSession(ctx.chat.id);
+  const draft = String(rawText || "").trim();
+  if (!draft) {
+    throw new Error("Pega un texto o envía una URL de video.");
+  }
+  session.pendingSocialVideo = null;
+  session.pendingTradText = { step: "choose", draft };
+  return draft;
+}
+
+async function askTradTextChoice(ctx, draft) {
+  const preview = draft.length > 600 ? `${draft.slice(0, 600)}…` : draft;
+  await ctx.reply(
+    [
+      "📝 Texto recibido para /trad (IA).",
+      "",
+      preview,
+      "",
+      "¿Qué hago?",
+      "• Corregir — ortografía y redacción",
+      "• Traducir — al español",
+      "• Buscar — información con Tavily y enriquecer el texto",
+      "• Audio — primero te muestro el texto y confirmas",
+    ].join("\n"),
+    tradTextKeyboard()
+  );
+}
+
+async function askTradTextAudioConfirm(ctx, draft) {
+  const session = getSession(ctx.chat.id);
+  session.pendingTradText = {
+    ...(session.pendingTradText || {}),
+    step: "confirm_audio",
+    draft,
+  };
+  const body = draft.length > 3500 ? `${draft.slice(0, 3500)}…` : draft;
+  await ctx.reply(
+    [
+      "🔊 Texto que se narrará en el audio:",
+      "",
+      body,
+      "",
+      "¿Genero el audio con este texto, o quieres cambiarlo?",
+    ].join("\n"),
+    tradTextAudioConfirmKeyboard()
+  );
+}
+
+async function generateTradTextAudio(ctx, draft) {
+  await reply(ctx, "🔊 Generando audio (voz /trad)…", { voice: false });
+  const voiceId =
+    config.trad?.voiceId ||
+    config.audio.mistralTtsVoiceId ||
+    "";
+  const audioPath = await synthesizeSpeech(draft, {
+    voiceId,
+    preferMistral: true,
+  });
+  try {
+    const buf = await readTempFile(audioPath);
+    await ctx.replyWithAudio(Input.fromBuffer(buf, "trad-texto.mp3"), {
+      caption: draft.slice(0, 900),
+    });
+  } finally {
+    cleanupTemp(audioPath);
+  }
+}
+
+async function applyTradTextAction(ctx, action) {
+  const session = getSession(ctx.chat.id);
+  const pending = session.pendingTradText;
+  if (!pending?.draft && action !== "cancel") {
+    throw new Error("No hay texto /trad pendiente. Usa /trad y pega el texto.");
+  }
+  const draft = pending?.draft || "";
+
+  if (action === "cancel") {
+    session.pendingTradText = null;
+    await reply(ctx, "/trad texto cancelado.", { voice: false });
+    return;
+  }
+
+  if (action === "correct") {
+    await reply(ctx, "✍️ Corrigiendo texto…", { voice: false });
+    const out = await correctTradText(draft);
+    session.pendingTradText = { step: "choose", draft: out };
+    await reply(ctx, `✅ Texto corregido:\n\n${out}`, { voice: false });
+    await askTradTextChoice(ctx, out);
+    return;
+  }
+
+  if (action === "translate") {
+    await reply(ctx, "🌐 Traduciendo al español…", { voice: false });
+    const out = await translateToSpanish(draft, { context: "texto para /trad" });
+    session.pendingTradText = { step: "choose", draft: out };
+    await reply(ctx, `✅ Traducción:\n\n${out}`, { voice: false });
+    await askTradTextChoice(ctx, out);
+    return;
+  }
+
+  if (action === "search") {
+    if (!isTavilyEnabled()) {
+      throw new Error("Tavily no está configurado (TAVILY_API_KEY en .env).");
+    }
+    await reply(ctx, "🔍 Buscando información con Tavily…", { voice: false });
+    const topic = draft.length > 280 ? draft.slice(0, 280) : draft;
+    const research = await tavilyResearchTopic(topic, {
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+    if (!research) {
+      throw new Error("Tavily no devolvió resultados.");
+    }
+
+    const answer = String(research.answer || "").trim();
+    const sources = (research.results || [])
+      .slice(0, 4)
+      .map((r, i) => `${i + 1}. ${r.title || "Fuente"}\n${r.url || ""}`)
+      .filter(Boolean)
+      .join("\n\n");
+
+    const briefParts = [];
+    if (answer) briefParts.push(answer);
+    if (research.researchText) {
+      briefParts.push(String(research.researchText).slice(0, 5000));
+    }
+    const researchBrief = briefParts.join("\n\n");
+
+    const infoMsg = [
+      "🔎 Hallazgos Tavily:",
+      answer ? `\n${answer.slice(0, 1500)}` : "\n(Sin resumen automático)",
+      sources ? `\n\nFuentes:\n${sources}` : "",
+    ].join("");
+    await reply(ctx, infoMsg.slice(0, 3900), { voice: false });
+
+    await reply(ctx, "✍️ Enriqueciendo tu texto con esos datos…", { voice: false });
+    const out = await enrichTradTextWithResearch(draft, researchBrief);
+    session.pendingTradText = {
+      step: "choose",
+      draft: out,
+      researchBrief,
+    };
+    await reply(ctx, `✅ Texto enriquecido:\n\n${out}`, { voice: false });
+    await askTradTextChoice(ctx, out);
+    return;
+  }
+
+  if (action === "audio") {
+    await askTradTextAudioConfirm(ctx, draft);
+    return;
+  }
+
+  if (action === "audio_yes") {
+    await generateTradTextAudio(ctx, draft);
+    session.pendingTradText = { step: "choose", draft };
+    await askTradTextChoice(ctx, draft);
+    return;
+  }
+
+  if (action === "audio_edit") {
+    session.pendingTradText = { ...pending, step: "await_audio_text", draft };
+    await reply(
+      ctx,
+      "✏️ Envía ahora el texto exacto que quieres en el audio (o /cancelar).",
+      { voice: false }
+    );
+    return;
+  }
+
+  if (action === "audio_back") {
+    session.pendingTradText = { ...pending, step: "choose", draft };
+    await askTradTextChoice(ctx, draft);
+    return;
+  }
+
+  throw new Error(`Acción /trad texto desconocida: ${action}`);
 }
 
 async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
@@ -761,7 +1319,7 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
   });
 
   if (built.overlayOnly) {
-    await reply(ctx, "🇪🇸 Video en español — no se tradujo, solo overlay FV.", {
+    await reply(ctx, "🇪🇸 Video en español — no se tradujo, solo reel 9:16.", {
       voice: false,
     });
   }
@@ -778,7 +1336,11 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
   }
 
   await reply(ctx, "✍️ Generando caption…", { voice: false });
-  const hashtag = destPrimaryHashtag(session.publishDest || "fvdigital");
+  const dest = session.publishDest || "fvdigital";
+  const hashtag =
+    dest === "f1rd"
+      ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+      : config.publishWebhook?.hashtag || "#fvdigital";
   const captionSeed =
     built.headline ||
     built.translation?.slice(0, 280) ||
@@ -790,7 +1352,7 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
     captionSeed,
     { hashtag }
   ).catch(() => captionSeed);
-  const caption = ensureCaptionHashtag(rawCaption, session.publishDest || "fvdigital");
+  const caption = ensureCaptionHashtag(rawCaption, dest);
 
   const pending = {
     kind: "trad",
@@ -844,23 +1406,62 @@ async function processTradVideoUrl(ctx, sourceUrl) {
 
   await reply(
     ctx,
-    "⏳ /trad: descargando video (detecto idioma → doblaje o solo overlay)…",
+    "⏳ /trad: descargando video y detectando audio/caption…",
     { voice: false }
   );
 
-  const job = await prepareTradJob(sourceUrl, {
+  const inspected = await inspectTradVideo(sourceUrl, {
     onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
   });
 
-  session.pendingTradJob = job;
+  session.pendingTradJob = inspected;
   session.pendingSocialVideo = {
     kind: "trad",
-    step: "ask_headline",
-    sourceUrl: job.sourceUrl,
-    headline: job.headline,
+    step: "await_source_mode",
+    sourceUrl: inspected.sourceUrl,
   };
 
-  await askTradHeadlineConfirm(ctx, job);
+  // Un solo camino disponible → no preguntar
+  if (inspected.hasTranscript && !inspected.hasCaption) {
+    await reply(ctx, "Solo hay audio usable → traduzco el audio…", {
+      voice: false,
+    });
+    const job = await continueTradJob(inspected, {
+      mode: "translate_audio",
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+    session.pendingTradJob = job;
+    session.pendingSocialVideo = {
+      kind: "trad",
+      step: "ask_headline",
+      sourceUrl: job.sourceUrl,
+      headline: job.headline,
+    };
+    await askTradHeadlineConfirm(ctx, job);
+    return;
+  }
+  if (inspected.hasCaption && !inspected.hasTranscript) {
+    await reply(
+      ctx,
+      "Solo hay caption → lo traduzco a español y creo el audio…",
+      { voice: false }
+    );
+    const job = await continueTradJob(inspected, {
+      mode: "from_caption",
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+    session.pendingTradJob = job;
+    session.pendingSocialVideo = {
+      kind: "trad",
+      step: "ask_headline",
+      sourceUrl: job.sourceUrl,
+      headline: job.headline,
+    };
+    await askTradHeadlineConfirm(ctx, job);
+    return;
+  }
+
+  await askTradSourceMode(ctx, inspected);
 }
 
 async function sendPendingSocialVideoToWebhook(ctx) {
@@ -877,16 +1478,22 @@ async function sendPendingSocialVideoToWebhook(ctx) {
   }
 
   const dest = session.publishDest || "fvdigital";
+  // Fuerza hashtag correcto antes de enviar (F1RD = #Formula1RD para n8n).
+  // Videos: caption en el idioma original (NO se fuerza inglés).
+  const caption =
+    dest === "both"
+      ? ensureCaptionHashtag(pending.caption, "both")
+      : captionForTarget(pending.caption, dest === "f1rd" ? "f1rd" : "fvdigital");
   const results = await publishToDestinations(dest, {
-    caption: pending.caption,
-    title: pending.title || pending.caption,
+    caption,
+    title: pending.title || caption,
     videoUrl: pending.videoUrl,
     r2Key: pending.r2Key || null,
     mediaType: "VIDEO",
   });
 
   session.pendingSocialVideo = null;
-  const caption = results.find((r) => r.caption)?.caption || pending.caption;
+  const sentCaption = results.find((r) => r.caption)?.caption || caption;
   const failed = results.filter((r) => !r.ok);
   const ok = results.filter((r) => r.ok);
   if (!ok.length) {
@@ -896,7 +1503,7 @@ async function sendPendingSocialVideoToWebhook(ctx) {
   const note = queued
     ? `Video (R2) encolado en n8n (${destLabel(dest)}).`
     : `Video enviado a ${destLabel(dest)}.`;
-  await ctx.reply(`${note}\n\n${pending.videoUrl}\n\n${caption}`, {
+  await ctx.reply(`${note}\n\n${pending.videoUrl}\n\n${sentCaption}`, {
     disable_web_page_preview: true,
   });
   if (failed.length) {
@@ -995,6 +1602,50 @@ async function handleTermometroPhoto(ctx, imageBuffer, mimeType) {
     if (workDir) {
       cleanupTermometroWorkDir(workDir);
     }
+  }
+}
+
+async function handleReporteCommand(ctx) {
+  if (unauthorized(ctx)) return;
+  rememberChat(ctx);
+  await reply(ctx, "Armando REPORTE Intrant (fuentes del día → Word + correo)…", {
+    voice: false,
+  });
+  try {
+    const result = await runIntrantReport({
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+    await reply(ctx, formatReporteTelegram(result), { voice: false });
+  } catch (error) {
+    console.error("/reporte:", error);
+    await reply(ctx, `❌ REPORTE: ${error.message}`, { voice: false });
+  }
+}
+
+async function handleBuscaCommand(ctx, headline = "") {
+  if (unauthorized(ctx)) return;
+  rememberChat(ctx);
+  const q = String(headline || "").trim();
+  if (!q) {
+    await reply(
+      ctx,
+      "Uso: /busca [titular]\nEjemplo: /busca INTRANT anuncia operativo en la Duarte",
+      { voice: false }
+    );
+    return;
+  }
+  await reply(ctx, `Buscando dónde se publicó:\n«${q}»\n(Tavily + Brave)…`, {
+    voice: false,
+  });
+  try {
+    const result = await searchHeadlineSources(q, {
+      send: true,
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+    await reply(ctx, formatBuscaTelegram(result), { voice: false });
+  } catch (error) {
+    console.error("/busca:", error);
+    await reply(ctx, `❌ /busca: ${error.message}`, { voice: false });
   }
 }
 
@@ -1184,6 +1835,191 @@ async function tryRouteVideoIntent(ctx, text) {
     await ctx.reply(`❌ Video: ${error.message}`, { voice: false });
     return true;
   }
+}
+
+const INTENT_LABELS = {
+  write_news: "redactar noticia",
+  wp: "artículo WordPress",
+  periodista: "modo periodista",
+  termometro: "imagen Termómetro",
+  pic: "lower-third /pic",
+  reporte: "REPORTE Intrant",
+  busca: "buscar titular / medios",
+  heygen: "video HeyGen",
+  hyperframes: "HyperFrames",
+  remotion: "Remotion",
+  video_status: "estado de video",
+  trad: "traducir / doblar",
+  noticia_ocr: "noticia desde captura",
+  nota: "nota desde documento",
+  recortar: "recortar imagen",
+  help: "ayuda",
+  estado: "estado del bot",
+  cancel: "cancelar",
+};
+
+/**
+ * Ejecuta una orden clasificada (voz o texto).
+ * @returns {Promise<boolean>} true si se despachó
+ */
+async function dispatchCommandIntent(ctx, intent) {
+  if (!intent?.action || intent.action === "chat") return false;
+  const session = getSession(ctx.chat.id);
+
+  try {
+    switch (intent.action) {
+      case "help":
+        await reply(ctx, helpText());
+        return true;
+
+      case "estado":
+        await reply(
+          ctx,
+          [
+            `Modo: ${session.mode}`,
+            `Voz: ${session.voiceReplies ? "on" : "off"}`,
+            `STT: ${getSpeechProviderLabel()}`,
+            `Último post: ${session.lastPostId || "ninguno"}`,
+          ].join("\n")
+        );
+        return true;
+
+      case "cancel": {
+        if (session.writeFlow) cancelWriteFlow(session);
+        if (session.hyperFlow) cancelHyperFlow(session);
+        if (session.termometroFlow) session.termometroFlow = null;
+        if (session.pendingSocialVideo) session.pendingSocialVideo = null;
+        if (session.pendingTradJob) {
+          await discardTradJob(session.pendingTradJob);
+          session.pendingTradJob = null;
+        }
+        if (session.pendingTradText) session.pendingTradText = null;
+        await reply(ctx, "Listo, cancelé lo que estaba en curso.");
+        return true;
+      }
+
+      case "write_news":
+        await startWriteFlow(
+          ctx,
+          intent.topic ? `/escribir ${intent.topic}` : "/escribir"
+        );
+        return true;
+
+      case "wp":
+        await startWpFlow(ctx, intent.topic ? `/wp ${intent.topic}` : "/wp");
+        return true;
+
+      case "periodista":
+        await startPeriodistaFlow(
+          ctx,
+          intent.title ? `/periodista ${intent.title}` : "/periodista"
+        );
+        return true;
+
+      case "termometro": {
+        session.termometroFlow = emptyTermometroFlow();
+        await reply(ctx, termometroIntroText());
+        return true;
+      }
+
+      case "pic": {
+        session.picFlow = emptyPicFlow();
+        const title = intent.raw.replace(/^\/pic\s*/i, "").trim();
+        if (title) session.picFlow.headline = title;
+        await reply(ctx, picIntroText(Boolean(title)), { voice: false });
+        return true;
+      }
+
+      case "reporte":
+        await handleReporteCommand(ctx);
+        return true;
+
+      case "busca": {
+        const headline =
+          intent.headline ||
+          intent.title ||
+          intent.raw.replace(/^\/busca\s*/i, "").trim();
+        await handleBuscaCommand(ctx, headline);
+        return true;
+      }
+
+      case "heygen":
+        await handleHeyGenCommand(ctx, intent.prompt || "");
+        return true;
+
+      case "hyperframes":
+        await handleHyperframesCommand(ctx, {
+          render: intent.render !== false,
+          prompt: intent.prompt || "",
+        });
+        return true;
+
+      case "remotion":
+        await handleRemotionCommand(ctx, { render: Boolean(intent.render) });
+        return true;
+
+      case "video_status":
+        await handleVideoStatus(ctx);
+        return true;
+
+      case "trad":
+        session.pendingSocialVideo = { kind: "trad", step: "await_url" };
+        await reply(
+          ctx,
+          "🎙️ /trad por voz: envía ahora el enlace del video o pega el texto a narrar."
+        );
+        return true;
+
+      case "noticia_ocr":
+        session.photoIntent = "noticia";
+        await reply(
+          ctx,
+          "📸 Modo noticia/OCR: envía la captura de pantalla de la noticia."
+        );
+        return true;
+
+      case "nota":
+        session.photoIntent = "nota";
+        await reply(
+          ctx,
+          "📄 Modo nota: envía el PDF o la foto del documento."
+        );
+        return true;
+
+      case "recortar":
+        session.photoIntent = "crop";
+        await reply(ctx, "✂️ Modo recorte: envía la imagen a recortar.");
+        return true;
+
+      default:
+        return false;
+    }
+  } catch (error) {
+    console.error("dispatchCommandIntent:", error);
+    await reply(ctx, `❌ No pude ejecutar la orden: ${error.message}`);
+    return true;
+  }
+}
+
+/**
+ * Clasifica y despacha órdenes naturales (texto o voz).
+ * @returns {Promise<boolean>}
+ */
+async function tryNaturalCommand(ctx, text) {
+  const intent = await resolveCommandIntent(text, { useAi: true });
+  if (!intent || intent.action === "chat") return false;
+
+  const label = INTENT_LABELS[intent.action] || intent.action;
+  const detail = intent.topic || intent.title || intent.prompt || "";
+  await ctx
+    .reply(
+      detail
+        ? `🎯 Orden detectada: ${label} — ${String(detail).slice(0, 120)}`
+        : `🎯 Orden detectada: ${label}`
+    )
+    .catch(() => {});
+
+  return dispatchCommandIntent(ctx, intent);
 }
 
 async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
@@ -2675,18 +3511,19 @@ async function handleChatText(ctx, text, { showThinking = false } = {}) {
 }
 
 async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
-  await ctx.reply("🎧 Escuchando tu audio...", { voice: false });
+  const session = getSession(ctx.chat.id);
+  session.fromVoice = !transcribeOnly;
+  await ctx.reply("🎧 Escuchando tu audio (Groq)…", { voice: false });
 
   try {
     const { buffer, ext } = await downloadTelegramFile(ctx, fileId);
     const text = await transcribeAudio(buffer, ext);
 
     if (!text) {
-      await reply(ctx, "No pude entender el audio.", { voice: false });
+      await reply(ctx, "No pude entender el audio.");
       return;
     }
 
-    const session = getSession(ctx.chat.id);
     const trimmed = text.trim();
 
     if (transcribeOnly) {
@@ -2694,6 +3531,9 @@ async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
       return;
     }
 
+    await ctx.reply(`📝 Entendí:\n${trimmed}`).catch(() => {});
+
+    // Misma tubería que texto: flujos activos → órdenes naturales → chat
     const url = extractFirstUrl(trimmed);
     if (url) {
       if (await maybeAskPublishDest(ctx, url, parseExtraCategories(trimmed), "link")) {
@@ -2707,11 +3547,6 @@ async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
       return;
     }
 
-    if (wantsWriteNews(trimmed)) {
-      await startWriteFlow(ctx, trimmed);
-      return;
-    }
-
     if (session.writeFlow) {
       await handleWriteFlowMessage(ctx, trimmed);
       return;
@@ -2722,34 +3557,45 @@ async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
       return;
     }
 
+    if (isTermometroActive(session)) {
+      const handled = handleTermometroText(session, trimmed);
+      if (handled) {
+        await reply(ctx, handled.reply);
+        return;
+      }
+    }
+
+    if (isPicFlowActive(session)) {
+      if (await handlePicFlowText(ctx, trimmed)) return;
+    }
+
+    if (session.pendingSocialVideo?.step === "await_url") {
+      const kind = session.pendingSocialVideo.kind === "trad" ? "trad" : "video";
+      if (kind === "trad" && trimmed.length >= 8 && !extractFirstUrl(trimmed)) {
+        session.pendingSocialVideo = null;
+        const draft = startTradTextFlow(ctx, trimmed);
+        await askTradTextChoice(ctx, draft);
+        return;
+      }
+      await reply(
+        ctx,
+        kind === "trad"
+          ? "Envía un enlace de video o un texto más largo para /trad."
+          : "Envía un enlace válido de video."
+      );
+      return;
+    }
+
+    if (await tryNaturalCommand(ctx, trimmed)) return;
+
     if (await tryRouteVideoIntent(ctx, trimmed)) return;
 
-    if (session.mode === "chat") {
-      await reply(ctx, `📝 Entendí:\n${trimmed}`, { voice: false });
-      await handleChatText(ctx, trimmed, { showThinking: false });
-      return;
-    }
-
-    if (isCasualMessage(trimmed) || isHelpMessage(trimmed)) {
-      await handleCasualChat(ctx, trimmed);
-      return;
-    }
-
-    const hasPendingPhoto =
-      session.buffer.photos.length > 0 || session.buffer.processedImage;
-
-    if (!hasPendingPhoto && !looksLikePublishableText(trimmed)) {
-      await handleCasualChat(ctx, trimmed);
-      return;
-    }
-
-    if (!session.buffer.text) session.buffer.text = trimmed;
-    else session.buffer.text = `${session.buffer.text}\n\n${trimmed}`;
-
-    await ctx.reply("📝 Entendí. Procesando tu noticia...", { voice: false });
-    scheduleFlush(ctx.chat.id, ctx);
+    // Charla / pregunta libre → DeepSeek + respuesta en audio
+    await handleChatText(ctx, trimmed, { showThinking: false });
   } catch (error) {
-    await reply(ctx, `❌ Audio: ${error.message}`, { voice: false });
+    await reply(ctx, `❌ Audio: ${error.message}`);
+  } finally {
+    session.fromVoice = false;
   }
 }
 
@@ -2776,6 +3622,17 @@ async function handlePhoto(ctx) {
 
     if (termometroAwaitingPhoto(session)) {
       await handleTermometroPhoto(ctx, imageBuffer, mimeType);
+      return;
+    }
+
+    if (
+      isPicFlowActive(session) ||
+      picAwaitingPhoto(session) ||
+      picAwaitingTitle(session) ||
+      /^\/pic\b/i.test(caption)
+    ) {
+      if (!session.picFlow) session.picFlow = emptyPicFlow();
+      await handlePicPhoto(ctx, imageBuffer, mimeType, caption);
       return;
     }
 
@@ -3073,10 +3930,16 @@ export async function startBot() {
   });
 
   bot.start(async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
     getSession(ctx.chat.id).mode = "auto";
-    await handleCasualChat(ctx, "hola");
+    await reply(ctx, helpText(), { voice: false });
   });
-  bot.command("ayuda", async (ctx) => reply(ctx, helpText(), { voice: false }));
+  bot.command(["ayuda", "help", "comandos"], async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    await reply(ctx, helpText(), { voice: false });
+  });
 
   bot.command("video", async (ctx) => {
     if (unauthorized(ctx)) return;
@@ -3112,18 +3975,31 @@ export async function startBot() {
       .trim();
     const url = extractFirstUrl(arg) || extractUrlFromMessage(ctx);
     try {
-      if (!url) {
-        const session = getSession(ctx.chat.id);
-        session.pendingSocialVideo = { step: "await_url", kind: "trad" };
-        await reply(
-          ctx,
-          "Envía el enlace del video (YouTube, Instagram, Facebook, Dailymotion o X).\nSi NO está en español: lo traduzco con voz pabmatos.\nSi YA está en español: solo pongo overlay FV en 9:16.",
-          { voice: false }
-        );
+      if (url) {
+        if (await maybeAskPublishDest(ctx, url, [], "trad")) return;
+        await processTradVideoUrl(ctx, url);
         return;
       }
-      if (await maybeAskPublishDest(ctx, url, [], "trad")) return;
-      await processTradVideoUrl(ctx, url);
+      if (arg) {
+        // Texto pegado junto al comando (sin URL).
+        const draft = startTradTextFlow(ctx, arg);
+        await askTradTextChoice(ctx, draft);
+        return;
+      }
+      const session = getSession(ctx.chat.id);
+      session.pendingTradText = null;
+      session.pendingSocialVideo = { step: "await_url", kind: "trad" };
+      await reply(
+        ctx,
+        [
+          "Envía el enlace del video (YouTube, Instagram, Facebook, Dailymotion o X)",
+          "o pega un texto para mejorarlo con IA (corregir / traducir / buscar Tavily / audio).",
+          "",
+          "Video: si NO está en español → doblaje pabmatos; si YA es ES → reel 9:16.",
+          "Titular del reel: igual que ahora (propuesta + Sí/No).",
+        ].join("\n"),
+        { voice: false }
+      );
     } catch (error) {
       console.error("/trad:", error);
       await ctx.reply(`❌ ${error.message}`);
@@ -3186,6 +4062,15 @@ export async function startBot() {
         .join("\n"),
       { voice: false }
     );
+  });
+
+  bot.command("reporte", async (ctx) => {
+    await handleReporteCommand(ctx);
+  });
+
+  bot.command("busca", async (ctx) => {
+    const headline = ctx.message.text.replace(/^\/busca(@\w+)?\s*/i, "").trim();
+    await handleBuscaCommand(ctx, headline);
   });
 
   bot.command(["alertas", "intrant"], async (ctx) => {
@@ -3357,6 +4242,12 @@ export async function startBot() {
 
   bot.command("cancelar", async (ctx) => {
     const session = getSession(ctx.chat.id);
+    if (session.pendingTradText) {
+      session.pendingTradText = null;
+      session.pendingSocialVideo = null;
+      await reply(ctx, "/trad texto cancelado.", { voice: false });
+      return;
+    }
     if (session.pendingTradJob) {
       await discardTradJob(session.pendingTradJob);
       session.pendingTradJob = null;
@@ -3388,6 +4279,11 @@ export async function startBot() {
     if (isTermometroActive(session)) {
       cancelTermometroFlow(session);
       await reply(ctx, termometroCancelText(), { voice: false });
+      return;
+    }
+    if (isPicFlowActive(session)) {
+      cancelPicFlow(session);
+      await reply(ctx, picCancelText(), { voice: false });
       return;
     }
     if (!session.writeFlow) {
@@ -3476,6 +4372,45 @@ export async function startBot() {
       return;
     }
     await reply(ctx, termometroIntroText(), { voice: false });
+  });
+
+  bot.command("pic", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    session.picFlow = emptyPicFlow();
+    const title = ctx.message.text.replace(/^\/pic\s*/i, "").trim();
+    if (title) session.picFlow.headline = title;
+    await reply(ctx, picIntroText(Boolean(title)), { voice: false });
+  });
+
+  bot.command("encuestas", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    await reply(
+      ctx,
+      "Publicando la siguiente encuesta pendiente (WP + redes FV)…",
+      { voice: false }
+    );
+    try {
+      const { encuestasDailyLimit, runEncuestas } = await import("./encuestas.mjs");
+      const result = await runEncuestas({ limit: encuestasDailyLimit() });
+      const n = result?.published?.length || 0;
+      const skip = result?.skipped?.length || 0;
+      const errs = result?.errors?.length || 0;
+      if (result?.noneNew) {
+        await reply(ctx, "No hay encuestas nuevas por publicar.", { voice: false });
+        return;
+      }
+      await reply(
+        ctx,
+        `Encuestas listas. Publicadas: ${n} | omitidas (sin foto): ${skip} | errores: ${errs}`,
+        { voice: false }
+      );
+    } catch (error) {
+      console.error("/encuestas:", error);
+      await ctx.reply(`❌ Encuestas: ${error.message}`);
+    }
   });
 
   bot.command("mas", async (ctx) => {
@@ -3642,6 +4577,75 @@ export async function startBot() {
     await handleAudioInput(ctx, ctx.message.audio.file_id, { transcribeOnly });
   });
 
+  bot.action(/^trad:source:(audio|caption|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    const choice = ctx.match[1];
+
+    try {
+      if (choice === "cancel") {
+        if (session.pendingTradJob) {
+          await discardTradJob(session.pendingTradJob);
+          session.pendingTradJob = null;
+        }
+        session.pendingSocialVideo = null;
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("/trad cancelado.");
+        return;
+      }
+
+      const pending = session.pendingTradJob;
+      if (!pending || pending.step !== "await_source_mode") {
+        await ctx.answerCbQuery("No hay /trad pendiente");
+        await ctx.reply("No hay video pendiente. Usa /trad con una URL.");
+        return;
+      }
+
+      const mode =
+        choice === "caption" ? "from_caption" : "translate_audio";
+      await ctx.answerCbQuery(
+        choice === "caption" ? "Desde caption" : "Traducir audio"
+      );
+      await reply(
+        ctx,
+        choice === "caption"
+          ? "📝 Traduciendo caption a español y creando audio…"
+          : "🌐 Traduciendo el audio…",
+        { voice: false }
+      );
+
+      const job = await continueTradJob(pending, {
+        mode,
+        onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+      });
+      session.pendingTradJob = job;
+      session.pendingSocialVideo = {
+        kind: "trad",
+        step: "ask_headline",
+        sourceUrl: job.sourceUrl,
+        headline: job.headline,
+      };
+      await askTradHeadlineConfirm(ctx, job);
+    } catch (error) {
+      console.error("trad:source:", error);
+      if (session.pendingTradJob) {
+        await discardTradJob(session.pendingTradJob);
+        session.pendingTradJob = null;
+      }
+      session.pendingSocialVideo = null;
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
   bot.action(/^trad:headline:(yes|no|cancel)$/, async (ctx) => {
     if (unauthorized(ctx)) {
       await ctx.answerCbQuery("No autorizado");
@@ -3678,6 +4682,112 @@ export async function startBot() {
         session.pendingTradJob = null;
       }
       session.pendingSocialVideo = null;
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.action(
+    /^trad:text:(correct|translate|search|audio|audio_yes|audio_edit|audio_back|cancel)$/,
+    async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const action = ctx.match[1];
+    try {
+      const labels = {
+        correct: "Corregir",
+        translate: "Traducir",
+        search: "Buscar",
+        audio: "Audio",
+        audio_yes: "Generar",
+        audio_edit: "Editar",
+        audio_back: "Volver",
+        cancel: "Cancelar",
+      };
+      await ctx.answerCbQuery(labels[action] || "OK");
+      await applyTradTextAction(ctx, action);
+    } catch (error) {
+      console.error("trad:text:", error);
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.action(/^pic:(fvdigital|f1rd|done|change|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    const action = ctx.match[1];
+    try {
+      if (action === "cancel") {
+        cancelPicFlow(session);
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("Modo /pic cancelado.");
+        return;
+      }
+      if (action === "done") {
+        const flow = session.picFlow;
+        if (!flow?.previewCard) {
+          await ctx.answerCbQuery("No hay vista previa");
+          await ctx.reply("No hay vista previa activa. Usa /pic de nuevo.");
+          return;
+        }
+        const dest = flow.dest || "fvdigital";
+        const title = flow.headline || "Gráfico";
+        const card = flow.previewCard;
+        const photoBuffer = flow.photoBuffer;
+        await ctx.answerCbQuery("Enviando…");
+        session.publishDest = dest;
+
+        await ctx.replyWithPhoto(Input.fromBuffer(card, "pic-final.png"), {
+          caption: `✅ ${destLabel(dest)} · listo para publicar`,
+        });
+
+        await sendCardToWebhook(ctx, {
+          card,
+          title,
+          bodyText: title,
+          imageBuffer: photoBuffer,
+        });
+
+        cancelPicFlow(session);
+        return;
+      }
+      if (action === "change") {
+        if (!session.picFlow) {
+          await ctx.answerCbQuery("No hay /pic activo");
+          return;
+        }
+        session.picFlow.step = "awaiting_dest";
+        session.picFlow.dest = null;
+        session.picFlow.previewCard = null;
+        await ctx.answerCbQuery("Otra marca");
+        await ctx.reply(picAskDestText(session.picFlow.headline), picDestKeyboard());
+        return;
+      }
+      if (!session.picFlow?.photoBuffer || session.picFlow?.step !== "awaiting_dest") {
+        await ctx.answerCbQuery("No hay foto pendiente");
+        await ctx.reply("No hay foto pendiente. Usa /pic y envía una imagen.");
+        return;
+      }
+      await ctx.answerCbQuery(destLabel(action));
+      await showPicPreview(ctx, action);
+    } catch (error) {
+      console.error("pic choice:", error);
       try {
         await ctx.answerCbQuery("Error");
       } catch {
@@ -3832,17 +4942,30 @@ export async function startBot() {
     const trimmed = incoming.trim();
     const url = extractUrlFromMessage(ctx);
 
-    // /video o /trad: esperando URL
+    // /video o /trad: esperando URL (o texto si es /trad)
     if (session.pendingSocialVideo?.step === "await_url") {
       const videoUrl = url || extractFirstUrl(trimmed);
+      const kind = session.pendingSocialVideo.kind === "trad" ? "trad" : "video";
       if (!videoUrl) {
+        if (kind === "trad" && trimmed.length >= 8) {
+          try {
+            session.pendingSocialVideo = null;
+            const draft = startTradTextFlow(ctx, trimmed);
+            await askTradTextChoice(ctx, draft);
+          } catch (error) {
+            console.error("pendingTradText:", error);
+            await ctx.reply(`❌ ${error.message}`);
+          }
+          return;
+        }
         await ctx.reply(
-          "Necesito un enlace válido (YouTube, Instagram, Facebook, Dailymotion o X). O /cancelar."
+          kind === "trad"
+            ? "Envía un enlace de video o pega un texto (mín. 8 caracteres). O /cancelar."
+            : "Necesito un enlace válido (YouTube, Instagram, Facebook, Dailymotion o X). O /cancelar."
         );
         return;
       }
       try {
-        const kind = session.pendingSocialVideo.kind === "trad" ? "trad" : "video";
         session.pendingSocialVideo = null;
         if (await maybeAskPublishDest(ctx, videoUrl, [], kind)) return;
         if (kind === "trad") {
@@ -3852,6 +4975,37 @@ export async function startBot() {
         }
       } catch (error) {
         console.error("pendingSocialVideo URL:", error);
+        await ctx.reply(`❌ ${error.message}`);
+      }
+      return;
+    }
+
+    // /trad texto: esperando el guion exacto del audio
+    if (session.pendingTradText?.step === "await_audio_text" && !url) {
+      const next = trimmed;
+      if (next.length < 3) {
+        await ctx.reply("El texto del audio es muy corto. Envía el texto completo o /cancelar.");
+        return;
+      }
+      try {
+        session.pendingTradText = {
+          ...session.pendingTradText,
+          step: "confirm_audio",
+          draft: next,
+        };
+        await askTradTextAudioConfirm(ctx, next);
+      } catch (error) {
+        await ctx.reply(`❌ ${error.message}`);
+      }
+      return;
+    }
+
+    // /trad texto: nuevo borrador pegado mientras hay menú activo
+    if (session.pendingTradText?.step === "choose" && !url && trimmed.length >= 8) {
+      try {
+        const draft = startTradTextFlow(ctx, trimmed);
+        await askTradTextChoice(ctx, draft);
+      } catch (error) {
         await ctx.reply(`❌ ${error.message}`);
       }
       return;
@@ -3889,16 +5043,6 @@ export async function startBot() {
       return;
     }
 
-    if (wantsWriteNews(trimmed)) {
-      try {
-        await startWriteFlow(ctx, trimmed);
-      } catch (error) {
-        console.error("startWriteFlow:", error);
-        await ctx.reply(`❌ Error: ${error.message}`);
-      }
-      return;
-    }
-
     if (session.writeFlow) {
       try {
         await handleWriteFlowMessage(ctx, trimmed);
@@ -3930,6 +5074,24 @@ export async function startBot() {
         console.error("termometroFlow text:", error);
         await ctx.reply(`❌ ${error.message}`);
       }
+      return;
+    }
+
+    if (isPicFlowActive(session)) {
+      try {
+        if (await handlePicFlowText(ctx, trimmed)) return;
+      } catch (error) {
+        console.error("picFlow text:", error);
+        await ctx.reply(`❌ ${error.message}`);
+        return;
+      }
+    }
+
+    try {
+      if (await tryNaturalCommand(ctx, trimmed)) return;
+    } catch (error) {
+      console.error("tryNaturalCommand:", error);
+      await ctx.reply(`❌ Error: ${error.message}`);
       return;
     }
 
@@ -3993,21 +5155,64 @@ export async function startBot() {
     }),
   });
 
-  // En Telegraf 4, launch() no resuelve mientras el bot está vivo — no hacer await.
-  bot
-    .launch({ dropPendingUpdates: true })
-    .catch((error) => {
-      if (error.response?.error_code === 409) {
+  try {
+    await bot.telegram.setMyCommands([
+      { command: "ayuda", description: "Lista de comandos" },
+      { command: "escribir", description: "Redactar noticia" },
+      { command: "periodista", description: "Noticia con tu titular" },
+      { command: "wp", description: "Artículo guiado a WP" },
+      { command: "noticia", description: "OCR captura → WP" },
+      { command: "alertas", description: "Sync Google Alerts Intrant" },
+      { command: "reporte", description: "REPORTE Intrant Word + correo" },
+      { command: "busca", description: "Localizar titular + borrador correo" },
+      { command: "encuestas", description: "1 encuesta pendiente FV" },
+      { command: "video", description: "Video redes → webhook" },
+      { command: "trad", description: "Video doblaje/overlay o texto IA" },
+      { command: "foto", description: "Video Termómetro" },
+      { command: "publicar", description: "Publicar borrador" },
+      { command: "estado", description: "Estado del bot" },
+      { command: "cancelar", description: "Cancelar flujo" },
+    ]);
+  } catch (e) {
+    console.warn("setMyCommands:", e.message);
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /** Reintenta polling si DNS/red cae (ENOTFOUND, ETIMEDOUT, etc.). */
+  async function launchWithRetry() {
+    let delayMs = 3000;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await bot.launch({ dropPendingUpdates: attempt === 1 });
+        return;
+      } catch (error) {
+        const code = error.response?.error_code;
+        const msg = error.message || String(error);
+        if (code === 409) {
+          console.error(
+            "409 Conflict: hay otra instancia del bot. Ejecuta: npm run bot:stop"
+          );
+          cleanupPidFile();
+          httpServer.close();
+          process.exit(1);
+        }
         console.error(
-          "409 Conflict: hay otra instancia del bot. Ejecuta: npm run bot:stop"
+          `bot.launch intento ${attempt} falló: ${msg} — reintento en ${Math.round(delayMs / 1000)}s`
         );
-      } else {
-        console.error("bot.launch:", error.message);
+        await sleep(delayMs);
+        delayMs = Math.min(delayMs * 1.6, 60000);
       }
-      cleanupPidFile();
-      httpServer.close();
-      process.exit(1);
-    });
+    }
+  }
+
+  // En Telegraf 4, launch() no resuelve mientras el bot está vivo — no hacer await.
+  launchWithRetry().catch((error) => {
+    console.error("bot.launch fatal:", error.message);
+    cleanupPidFile();
+    httpServer.close();
+    process.exit(1);
+  });
 
   console.log(
     `JARVIS online — FV Digital (Telegram + DeepSeek + Mistral) — http://127.0.0.1:${config.server.port}`
@@ -4016,13 +5221,22 @@ export async function startBot() {
   const shutdown = async (signal) => {
     console.log(`Deteniendo (${signal})...`);
     httpServer.close();
-    await bot.stop(signal);
+    await bot.stop(signal).catch(() => {});
     cleanupPidFile();
     process.exit(0);
   };
 
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("uncaughtException", (error) => {
+    console.error("uncaughtException (bot sigue):", error?.message || error);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error(
+      "unhandledRejection (bot sigue):",
+      reason?.message || reason
+    );
+  });
   return bot;
 }
 
