@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "aisa": {
+      "source": "AIsa-team/agent-skills",
+      "sourceType": "github",
+      "skillPath": "platform/aisa/SKILL.md",
+      "computedHash": "eb961442754262e8322688f74f35089121153858052ca16b3ba212f7d1d7f2a4"
+    }
+  }
+}

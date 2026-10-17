@@ -7,6 +7,9 @@ $PsExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 $startRaw = "09:15"
 $endRaw = "21:15"
+$fvCountRaw = "4"
+$f1CountRaw = ""
+$f1CountSet = $false
 $envPath = Join-Path $Root ".env"
 if (Test-Path $envPath) {
     foreach ($line in Get-Content $envPath) {
@@ -16,8 +19,17 @@ if (Test-Path $envPath) {
         if ($line -match '^\s*FEED_REPOST_END\s*=\s*(.+)\s*$') {
             $endRaw = $Matches[1].Trim()
         }
+        if ($line -match '^\s*FEED_REPOST_COUNT\s*=\s*(.+)\s*$') {
+            $fvCountRaw = $Matches[1].Trim()
+        }
+        if ($line -match '^\s*FEED_REPOST_F1_COUNT\s*=\s*(.+)\s*$') {
+            $f1CountRaw = $Matches[1].Trim()
+            if ($f1CountRaw -ne "") { $f1CountSet = $true }
+        }
     }
 }
+# Igual que config.mjs: si no hay FEED_REPOST_F1_COUNT, F1RD usa FEED_REPOST_COUNT.
+if (-not $f1CountSet) { $f1CountRaw = $fvCountRaw }
 
 function Parse-Hm([string]$raw) {
     $parts = $raw.Trim() -split ":"
@@ -68,11 +80,12 @@ Register-ScheduledTask `
     -Trigger $triggers `
     -Settings $settings `
     -Principal $principal `
-    -Description "Feeds FV + Motorsport F1: hasta 2 nuevas c/u → webhooks fvdigital y formula1rd ($startRaw-$endRaw)" | Out-Null
+    -Description "Feeds FV + Motorsport F1: hasta $fvCountRaw nuevas de FV y $f1CountRaw de F1 c/u → webhooks fvdigital y formula1rd ($startRaw-$endRaw)" | Out-Null
 
 Write-Host "Tarea programada instalada:"
 Write-Host "  Nombre:   $TaskName"
 Write-Host "  Horario:  cada hora desde $startRaw hasta $endRaw (hora local, $($triggers.Count) triggers)"
+Write-Host "  Noticias: hasta $fvCountRaw de FV Digital / hasta $f1CountRaw de Motorsport F1 por corrida"
 Write-Host "  Script:   $RunScript"
 Write-Host "  Log:      $(Join-Path $Root 'logs\feed-repost.log')"
 Write-Host ""

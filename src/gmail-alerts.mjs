@@ -17,6 +17,13 @@ import {
   isSameLocalDay,
 } from "./gmail-alerts-imap.mjs";
 import { DESDE_AGENTE } from "./sheets-alerts.mjs";
+import {
+  extractDateFromUrl,
+  isFreshIntrantAlert,
+  looksLikeStaleIntrantAppointment,
+  newsAgeHours,
+} from "./news-date.mjs";
+import { fetchArticleFromUrl } from "./news-fetch.mjs";
 
 function startOfLocalDay(now = new Date()) {
   const d = new Date(now);
@@ -62,6 +69,86 @@ function dedupeAlerts(alerts) {
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * Enriquece publishedAt desde URL (meta + cuerpo) o fecha en la URL.
+ * Sin inventar: si falla el fetch, solo queda extractDateFromUrl.
+ */
+async function enrichAlertPublishedAt(alert) {
+  const url = String(alert?.url || "").trim();
+  const fromUrl = extractDateFromUrl(url);
+  let publishedAt = alert.publishedAt || fromUrl || "";
+
+  if (url) {
+    try {
+      const article = await fetchArticleFromUrl(url);
+      if (article?.publishedAt) publishedAt = article.publishedAt;
+      else if (fromUrl) publishedAt = fromUrl;
+    } catch {
+      // keep URL date if any
+    }
+  }
+
+  return {
+    ...alert,
+    publishedAt: publishedAt || alert.publishedAt || "",
+    title: alert.title || alert.titulo || "",
+  };
+}
+
+/**
+ * Solo Intrant: abre/valida fecha (≤24h). Sin fecha fiable → fuera.
+ * Titulares Méndez recirculados → fuera salvo fecha verificada ≤24h.
+ */
+export async function filterFreshArticleAlerts(
+  alerts = [],
+  { maxAgeHours = 24, onStatus, concurrency = 4 } = {}
+) {
+  const list = Array.isArray(alerts) ? alerts : [];
+  if (!list.length) return [];
+
+  const now = new Date();
+  const enriched = [];
+  for (let i = 0; i < list.length; i += concurrency) {
+    const batch = list.slice(i, i + concurrency);
+    const part = await Promise.all(batch.map((a) => enrichAlertPublishedAt(a)));
+    enriched.push(...part);
+  }
+
+  const kept = [];
+  let dropped = 0;
+  for (const a of enriched) {
+    const title = a.title || a.titulo || "";
+    const ok = isFreshIntrantAlert(
+      { url: a.url, publishedAt: a.publishedAt, title },
+      { maxAgeHours, now }
+    );
+    if (ok) {
+      kept.push(a);
+    } else {
+      dropped += 1;
+      const age = newsAgeHours(
+        { url: a.url, publishedAt: a.publishedAt },
+        now
+      );
+      const why =
+        looksLikeStaleIntrantAppointment(title) && age == null
+          ? "nombramiento-sin-fecha"
+          : age == null
+            ? "sin-fecha"
+            : `edad-${Math.round(age)}h`;
+      onStatus?.(
+        `🗑️ Fuera (>${maxAgeHours}h o sin fecha): ${String(title).slice(0, 70)}… [${why}]`
+      );
+    }
+  }
+  if (dropped) {
+    onStatus?.(
+      `⏱️ Frescura ≤${maxAgeHours}h: ${kept.length} ok, ${dropped} descartada(s)`
+    );
+  }
+  return kept;
 }
 
 /**
@@ -156,6 +243,22 @@ export async function fetchGoogleAlertsForSheet({
     `📬 Leyendo Google Alerts de Gmail (${mode}, ${onlyToday ? "hoy" : "semana"})...`
   );
 
+  const finalize = async (rows, sourceLabel) => {
+    let out = rows.map((a) => ({
+      ...a,
+      fuente: DESDE_AGENTE,
+      periodista: a.periodista || "Redacción",
+    }));
+    if (mode === "intrant") {
+      out = await filterFreshArticleAlerts(out, {
+        maxAgeHours: 24,
+        onStatus,
+      });
+    }
+    onStatus?.(`✅ ${sourceLabel}: ${out.length} noticia(s) lista(s) para sheet`);
+    return out;
+  };
+
   // 1) OAuth Gmail API
   try {
     const viaApi = await fetchGoogleAlertsGmailApi({
@@ -164,12 +267,8 @@ export async function fetchGoogleAlertsForSheet({
       mode,
       filters: resolvedFilters,
     });
-    onStatus?.(`✅ Gmail API: ${viaApi.length} noticia(s) filtrada(s)`);
-    return viaApi.map((a) => ({
-      ...a,
-      fuente: DESDE_AGENTE,
-      periodista: a.periodista || "Redacción",
-    }));
+    onStatus?.(`✅ Gmail API: ${viaApi.length} noticia(s) relevantes`);
+    return await finalize(viaApi, "Gmail API");
   } catch (error) {
     onStatus?.(`⚠️ Gmail API falló (${error.message}). Probando IMAP...`);
   }
@@ -186,10 +285,6 @@ export async function fetchGoogleAlertsForSheet({
       ? viaImap.filter((a) => isRelevantElectricAlert(a, resolvedFilters))
       : viaImap;
   const today = onlyToday ? filterTodayAlerts(filtered) : filtered;
-  onStatus?.(`✅ IMAP: ${today.length} noticia(s) filtrada(s)`);
-  return today.map((a) => ({
-    ...a,
-    fuente: DESDE_AGENTE,
-    periodista: a.periodista || "Redacción",
-  }));
+  onStatus?.(`✅ IMAP: ${today.length} noticia(s) relevantes`);
+  return await finalize(today, "IMAP");
 }

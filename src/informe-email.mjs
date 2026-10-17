@@ -379,15 +379,86 @@ function createTransport() {
   return nodemailer.createTransport({
     host: brevo.smtpServer,
     port: brevo.smtpPort,
-    secure: false,
+    secure: brevo.smtpPort === 465,
     auth: {
       user: brevo.smtpUser,
       pass: brevo.apiKey,
     },
+    // Fallar rápido: si la red bloquea SMTP no queremos esperar 2 minutos
+    connectionTimeout: 15000,
+    greetingTimeout: 10000,
+    socketTimeout: 30000,
   });
 }
 
-export async function sendEmail({ to, cc, subject, html, text, attachments = [] }) {
+function addressList(list = "") {
+  return String(list)
+    .split(/[,;]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((email) => ({ email }));
+}
+
+function attachmentToApi(a = {}) {
+  try {
+    const content = a.content ?? (a.path ? readFileSync(a.path) : null);
+    if (!content) return null;
+    return {
+      name: a.filename || "adjunto",
+      content: Buffer.from(content).toString("base64"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Envío por la API HTTPS de Brevo (puerto 443).
+ * Se usa cuando el SMTP está bloqueado por la red (VPN/ISP: 25/465/587/2525 sin salida).
+ */
+async function sendViaBrevoApi({ to, cc, subject, html, text, attachments = [] }) {
+  const { brevo } = config;
+  if (!brevo.apiV3Key) {
+    throw new Error(
+      "Falta BREVO_API_V3_KEY en .env (clave de API v3 de Brevo, empieza por xkeysib-). " +
+        "La clave SMTP (xsmtpsib-) no sirve para la API."
+    );
+  }
+
+  const body = {
+    sender: { email: brevo.senderEmail, name: brevo.senderName },
+    to: addressList(to),
+    subject,
+    htmlContent: html,
+    textContent: text,
+  };
+  if (cc && String(cc).trim()) body.cc = addressList(cc);
+  const files = (attachments || []).map(attachmentToApi).filter(Boolean);
+  if (files.length) body.attachment = files;
+
+  const res = await fetch(`${brevo.apiUrl}/smtp/email`, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "api-key": brevo.apiV3Key,
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data?.message || data?.error || JSON.stringify(data).slice(0, 200);
+    throw new Error(`Brevo API ${res.status}: ${detail}`);
+  }
+  return {
+    messageId: data?.messageId || "",
+    accepted: body.to.map((t) => t.email),
+    rejected: [],
+    transport: "brevo-api",
+  };
+}
+
+async function sendViaSmtp({ to, cc, subject, html, text, attachments = [] }) {
   const transport = createTransport();
   const payload = {
     from: `"${config.brevo.senderName}" <${config.brevo.senderEmail}>`,
@@ -407,7 +478,25 @@ export async function sendEmail({ to, cc, subject, html, text, attachments = [] 
     messageId: info.messageId,
     accepted: info.accepted,
     rejected: info.rejected,
+    transport: "smtp",
   };
+}
+
+export async function sendEmail({ to, cc, subject, html, text, attachments = [] }) {
+  try {
+    return await sendViaSmtp({ to, cc, subject, html, text, attachments });
+  } catch (error) {
+    if (!config.brevo.apiV3Key) {
+      throw new Error(
+        `${error.message} | Alternativa: define BREVO_API_V3_KEY para enviar por HTTPS (443) ` +
+          "cuando la red bloquea el SMTP (VPN/ISP)."
+      );
+    }
+    console.warn(
+      `⚠️ SMTP falló (${String(error.message).slice(0, 120)}) → reenvío por API Brevo (443)…`
+    );
+    return sendViaBrevoApi({ to, cc, subject, html, text, attachments });
+  }
 }
 
 export async function prepareClientEmail(

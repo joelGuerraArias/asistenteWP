@@ -10,9 +10,9 @@ import { getSheetsApi, resolveAlertsSpreadsheetId } from "./google-auth.mjs";
 import { fetchArticleFromUrl } from "./news-fetch.mjs";
 import {
   calendarYmd,
-  extractDateFromUrl,
+  isFreshIntrantAlert,
+  newsAgeHours,
   NEWS_TZ,
-  toYmd,
   todayYmd,
 } from "./news-date.mjs";
 import {
@@ -20,7 +20,6 @@ import {
   normalizeFechaKey,
 } from "./sheets-alerts.mjs";
 
-const MS_24H = 24 * 60 * 60 * 1000;
 const LAST_CHAT_FILE = join(config.root, ".last-chat.json");
 
 function resolveChatId() {
@@ -32,29 +31,6 @@ function resolveChatId() {
   } catch {
     return "";
   }
-}
-
-function publishedToDate(publishedAt = "", url = "") {
-  if (publishedAt) {
-    const d = new Date(publishedAt);
-    if (!Number.isNaN(d.getTime())) return d;
-    const ymd = toYmd(publishedAt);
-    if (ymd) {
-      const [y, m, day] = ymd.split("-").map(Number);
-      return new Date(Date.UTC(y, m - 1, day, 16, 0, 0));
-    }
-  }
-  const fromUrl = extractDateFromUrl(url);
-  if (fromUrl) {
-    const [y, m, day] = fromUrl.split("-").map(Number);
-    return new Date(Date.UTC(y, m - 1, day, 16, 0, 0));
-  }
-  return null;
-}
-
-function ageHours(fromDate, now = new Date()) {
-  if (!fromDate) return null;
-  return (now.getTime() - fromDate.getTime()) / (60 * 60 * 1000);
 }
 
 function isSheetFechaToday(fecha = "") {
@@ -71,29 +47,32 @@ function padRow(row = []) {
   return out.slice(0, HEADERS.length);
 }
 
-async function verifyArticleAge(url, now = new Date()) {
+/** Verifica URL (meta + cuerpo). Sin fecha o >24h → stale. */
+async function verifyArticleAge(url, titleHint = "", now = new Date()) {
   const article = await fetchArticleFromUrl(url);
-  const published = publishedToDate(article.publishedAt, url);
-  if (!published) {
-    return {
-      ok: true,
-      verified: true,
-      stale: false,
-      reason: "sin-fecha-publicacion",
-      title: article.title || "",
-      publishedAt: article.publishedAt || "",
-      ageHours: null,
-    };
+  const title = article.title || titleHint || "";
+  const publishedAt = article.publishedAt || "";
+  const fresh = isFreshIntrantAlert(
+    { url, publishedAt, title },
+    { maxAgeHours: 24, now }
+  );
+  const hours = newsAgeHours({ url, publishedAt }, now);
+  let reason = "ok-menor-24h";
+  if (!fresh) {
+    reason =
+      hours == null
+        ? "sin-fecha-publicacion"
+        : hours > 24
+          ? "mayor-24h"
+          : "stale";
   }
-  const hours = ageHours(published, now);
-  const stale = hours != null && hours > 24;
   return {
     ok: true,
     verified: true,
-    stale,
-    reason: stale ? "mayor-24h" : "ok-menor-24h",
-    title: article.title || "",
-    publishedAt: article.publishedAt || published.toISOString(),
+    stale: !fresh,
+    reason,
+    title,
+    publishedAt: publishedAt || "",
     ageHours: hours == null ? null : Math.round(hours * 10) / 10,
   };
 }
@@ -165,7 +144,7 @@ export async function purgeStaleIntrantDayRows({
     }
 
     try {
-      const check = await verifyArticleAge(url, now);
+      const check = await verifyArticleAge(url, titulo, now);
       if (check.stale) {
         removed.push({
           titulo: check.title || titulo,

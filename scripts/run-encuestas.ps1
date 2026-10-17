@@ -1,4 +1,4 @@
-# Publica 1 encuesta pendiente (cron 10:00) → WP + webhook FV Digital.
+# Publica 1 encuesta temática pendiente (cron 09:00 / 16:00) → WP + ALPHA + redes.
 $ErrorActionPreference = "Continue"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LogDir = Join-Path $Root "logs"
@@ -24,7 +24,7 @@ function Write-Log([string]$msg) {
 Write-Log "Inicio encuestas publish (node=$Node)"
 Set-Location $Root
 try {
-    & $Node "scripts/run-encuestas.mjs" "--daily" 2>&1 |
+    & $Node "scripts/run-encuestas.mjs" "--daily" "--tema" 2>&1 |
         ForEach-Object { Add-Content -Path $LogFile -Value ($_ | Out-String).TrimEnd() -Encoding utf8 }
     $exit = $LASTEXITCODE
 } catch {

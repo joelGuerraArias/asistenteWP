@@ -187,5 +187,6 @@ export function emptyWriteFlow() {
     captureMime: null,
     extraCategorySlugs: [],
     research: null,
+    rewriteNotes: "",
   };
 }

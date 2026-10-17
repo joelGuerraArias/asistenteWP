@@ -511,6 +511,46 @@ function rowPeriodista(row = []) {
   return String(remapLegacyRow(row)[1] || "").trim().toLowerCase();
 }
 
+/**
+ * Lee filas del sheet Intrant con fecha = hoy.
+ * @returns {Promise<{ spreadsheetId: string, sheetName: string, todayKey: string, rows: Array<{fecha,periodista,titulo,texto,medio,sentimiento,url,desde}> }>}
+ */
+export async function readTodayAlertRows({
+  spreadsheetId,
+  sheetName = config.googleAlerts?.sheetName || "Hoja 1",
+  date = new Date(),
+} = {}) {
+  const id = spreadsheetId || (await resolveAlertsSpreadsheetId());
+  const sheets = getSheetsApi();
+  const ensured = await ensureSheetHeaders(sheets, id, sheetName);
+  const tab = ensured.sheetName;
+  const todayKey = normalizeFechaKey(formatFechaSheet(date.toISOString()));
+
+  const full = await sheets.spreadsheets.values.get({
+    spreadsheetId: id,
+    range: `${tab}!${RANGE_COLS}`,
+  });
+  const values = full.data.values || [];
+  const rows = [];
+  for (const raw of values.slice(1)) {
+    const mapped = remapLegacyRow(raw);
+    const fecha = normalizeFechaKey(String(mapped[0] || "").trim());
+    if (fecha !== todayKey) continue;
+    rows.push({
+      fecha: String(mapped[0] || "").trim(),
+      periodista: String(mapped[1] || "").trim(),
+      titulo: String(mapped[2] || "").trim(),
+      texto: String(mapped[3] || "").trim(),
+      medio: String(mapped[4] || "").trim(),
+      sentimiento: String(mapped[5] || "").trim(),
+      url: String(mapped[6] || "").trim(),
+      desde: String(mapped[7] || "").trim(),
+    });
+  }
+
+  return { spreadsheetId: id, sheetName: tab, todayKey, rows };
+}
+
 export async function ensureSheetHeaders(sheets, spreadsheetId, sheetName) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
   const tabs = meta.data.sheets || [];

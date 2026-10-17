@@ -100,6 +100,44 @@ function stripMd(s = "") {
     .trim();
 }
 
+/** Conserva **negritas** markdown como TextRun bold (nombres propios, etc.). */
+function inlineRuns(text, opts = {}) {
+  const size = opts.size ?? 20;
+  const color = opts.color ?? INK;
+  const forceBold = Boolean(opts.bold);
+  const parts = String(text ?? "").split(/(\*\*[^*]+\*\*)/g).filter((p) => p !== "");
+  if (!parts.length) {
+    return [
+      new TextRun({
+        text: "",
+        bold: forceBold,
+        size,
+        font: "Calibri",
+        color,
+      }),
+    ];
+  }
+  return parts.map((part) => {
+    const m = part.match(/^\*\*(.+)\*\*$/);
+    if (m) {
+      return new TextRun({
+        text: m[1],
+        bold: true,
+        size,
+        font: "Calibri",
+        color,
+      });
+    }
+    return new TextRun({
+      text: stripMd(part),
+      bold: forceBold,
+      size,
+      font: "Calibri",
+      color,
+    });
+  });
+}
+
 function isTableSep(line) {
   const t = line.trim();
   return /^(\|\s*:?-{3,}\s*)+\|?$/.test(t) || /^\|?\s*-{3,}/.test(t);
@@ -110,11 +148,11 @@ function parseTableRow(line) {
     .replace(/^\|/, "")
     .replace(/\|$/, "")
     .split("|")
-    .map((c) => stripMd(c.trim()));
+    .map((c) => c.trim());
 }
 
 function cellTone(text = "") {
-  const t = text.toLowerCase();
+  const t = stripMd(text).toLowerCase();
   if (/favor|positiv|🟢/.test(t)) return { fill: GREEN_BG, color: GREEN };
   if (/cr[ií]tic|negativ|riesgo|🔴/.test(t)) return { fill: RED_BG, color: RED };
   if (/neut|atenci|🟡/.test(t)) return { fill: ORANGE_BG, color: ORANGE };
@@ -128,15 +166,11 @@ function p(text, opts = {}) {
   return new Paragraph({
     spacing: { after: opts.after ?? 120, before: opts.before ?? 0, line: opts.line ?? 276 },
     alignment: opts.align,
-    children: [
-      new TextRun({
-        text: String(text ?? ""),
-        bold: opts.bold,
-        size: opts.size ?? 20,
-        font: "Calibri",
-        color: opts.color ?? INK,
-      }),
-    ],
+    children: inlineRuns(text, {
+      bold: opts.bold,
+      size: opts.size ?? 20,
+      color: opts.color ?? INK,
+    }),
   });
 }
 
@@ -160,9 +194,7 @@ function bullet(text) {
   return new Paragraph({
     bullet: { level: 0 },
     spacing: { after: 80 },
-    children: [
-      new TextRun({ text: stripMd(text), font: "Calibri", size: 20, color: INK }),
-    ],
+    children: inlineRuns(text, { size: 20, color: INK }),
   });
 }
 
@@ -206,15 +238,11 @@ function mdTable(rows) {
           margins: { top: 60, bottom: 60, left: 80, right: 80 },
           children: [
             new Paragraph({
-              children: [
-                new TextRun({
-                  text: cell,
-                  bold: ri === 0 || Boolean(tone),
-                  size: 16,
-                  font: "Calibri",
-                  color,
-                }),
-              ],
+              children: inlineRuns(cell, {
+                bold: ri === 0 || Boolean(tone),
+                size: 16,
+                color,
+              }),
             }),
           ],
         });
@@ -350,9 +378,9 @@ function markdownToDocxChildren(md = "") {
 
     if (/^[-*]\s+/.test(trimmed)) {
       if (inSemaforo) {
-        const t = stripMd(trimmed.replace(/^[-*]\s+/, ""));
+        const t = trimmed.replace(/^[-*]\s+/, "");
         semaforoParas.push(bullet(t));
-        semaforoText += ` ${t}`;
+        semaforoText += ` ${stripMd(t)}`;
       } else {
         out.push(bullet(trimmed.replace(/^[-*]\s+/, "")));
       }
@@ -362,7 +390,7 @@ function markdownToDocxChildren(md = "") {
 
     const plain = stripMd(trimmed);
     if (inSemaforo) {
-      semaforoParas.push(p(plain, { size: 20, after: 80 }));
+      semaforoParas.push(p(trimmed, { size: 20, after: 80 }));
       semaforoText += ` ${plain}`;
       i += 1;
       continue;
@@ -373,7 +401,7 @@ function markdownToDocxChildren(md = "") {
         plain
       );
     out.push(
-      p(plain, {
+      p(trimmed, {
         bold: isLabel,
         color: isLabel ? NAVY : INK,
         size: 20,

@@ -27,7 +27,7 @@ export function picIntroText(hasText = false) {
   if (hasText) {
     return "📸 Modo /pic.\n\nTexto guardado. Envía la foto. Verás la vista previa antes de confirmar.";
   }
-  return "📸 Modo /pic.\n\nEnvía foto + texto (o por separado). Corrijo ortografía, genero la tarjeta y te la muestro. Luego confirmas.";
+  return "📸 Modo /pic.\n\nEnvía foto + texto (o por separado). Solo corrijo ortografía (no reescribo el texto), genero la tarjeta y te la muestro. Luego confirmas.";
 }
 
 export function picAskTitleText() {

@@ -39,13 +39,18 @@
         text-align: center;
       }
       #quote {
+        width: 100%;
         max-width: 1040px;
+        min-width: 0;
         font-family: Georgia, "Times New Roman", serif;
-        font-size: 52px;
+        font-size: 46px;
         font-weight: 400;
         line-height: 1.28;
         color: #fff;
         text-shadow: 0 2px 18px rgba(8, 36, 90, 0.45);
+        overflow-wrap: break-word;
+        word-wrap: break-word;
+        hyphens: auto;
       }
       #quote .ch { display: inline; }
       #author {
@@ -86,8 +91,8 @@
         data-duration="30"
         data-track-index="1"
       >
-        <blockquote id="quote" data-text="“La vida no examinada no vale la pena ser vivida.”"></blockquote>
-        <p id="author">— Sócrates</p>
+        <blockquote id="quote" data-text="“Los límites de mi lenguaje son los límites de mi mundo.”"></blockquote>
+        <p id="author">— Ludwig Wittgenstein</p>
       </div>
     </div>
     <script>
@@ -98,7 +103,8 @@
       for (const ch of text) {
         const span = document.createElement("span");
         span.className = "ch";
-        span.textContent = ch === " " ? "\u00A0" : ch;
+        // Espacio normal (no NBSP) para que el titular pueda hacer wrap.
+        span.textContent = ch;
         quoteEl.appendChild(span);
       }
       const chars = quoteEl.querySelectorAll(".ch");

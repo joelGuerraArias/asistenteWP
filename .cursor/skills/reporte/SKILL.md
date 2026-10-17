@@ -22,12 +22,15 @@ Producto **REPORTE**: informe diario de movilidad/transporte Intrant.
 
 ## Fuentes
 
-- Medios digitales (alertas de prensa)
+- Medios digitales (alertas de prensa) — Gmail alerts → sheet (proceso aparte)
 - X (`@INTRANT_RD`)
-- YouTube Apify last SUCCEEDED — **solo títulos en español**
-- Instagram Apify **GET last**
+- **YouTube:** digest Gmail del día (`INTRANT · Tránsito RD | YouTube — DD/MM/YYYY`, salida Apify mailed). Fallback: Apify GET last + ventana hoy+`REPORTE_SOCIAL_DAYS` (default 3). **No** dispara runs; **no** escribe sheet.
+- **Instagram:** digest Gmail del día (`Seguimiento Intrant en Instagram - …`). Fallback: Apify GET last + misma ventana. Aislado de alertas/sheet.
 - Facebook: búsqueda lean `INTRANT RD` (`scraper_one/facebook-posts-search`)
-- TV/radio: `Analisishoy_YYYYMMDD.md` / radio del día en `INFORMES_DIR`
+- TV/radio: `Analisishoy_YYYYMMDD.md` completo (bloques `# 🎞️ Video` / `# 🎧 Audio`, hoy + ayer) — clips **.mp4** y audio **.wav/.mp3**
+- En el correo: banner del **término más mencionado** del ciclo + anexo fijo TV/Audio con tono
+
+Código digests (solo reporte): `src/reporte-gmail-digests.mjs`
 
 ## Producto de salida
 
@@ -65,6 +68,7 @@ Env: `APIFY_TOKEN`, `RAPIDAPI_KEY`, `INFORME_EMAIL_INTRANT` (todos los destinos 
 
 - `src/intrant-report.mjs` — orquesta
 - `src/intrant-report-sources.mjs` — fuentes
+- `src/reporte-gmail-digests.mjs` — digests YT/IG (solo reporte)
 - `src/intrant-report-brief.mjs` — prompt + HTML correo
 - `src/intrant-report-docx.mjs` — Word ejecutivo
 - `scripts/run-intrant-report.mjs` — CLI

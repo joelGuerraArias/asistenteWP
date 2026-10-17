@@ -1,19 +1,20 @@
-# Instala tareas Windows: check 09:00 + publicar 10:00 (ENCUESTAS_* en .env).
+# Instala publicaciones de encuestas temáticas (ALPHA) a las horas de ENCUESTAS_CRON_TIME.
+# Default: 09:00 y 16:00. Una encuesta por corrida; al agotar el MD reinicia la cola.
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$PublishTask = "AsistenteWP-Encuestas"
-$CheckTask = "AsistenteWP-Encuestas-Check"
 $PublishScript = Join-Path $PSScriptRoot "run-encuestas.ps1"
 $CheckScript = Join-Path $PSScriptRoot "run-encuestas-check.ps1"
 $PsExe = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
-$publishTime = "10:00"
-$checkTime = "09:00"
+$publishTimes = @("09:00", "16:00")
+$checkTime = ""
 $envPath = Join-Path $Root ".env"
 if (Test-Path $envPath) {
     foreach ($line in Get-Content $envPath) {
         if ($line -match '^\s*ENCUESTAS_CRON_TIME\s*=\s*(.+)\s*$') {
-            $publishTime = $Matches[1].Trim()
+            $raw = $Matches[1].Trim()
+            $publishTimes = @($raw -split '[,;\s]+' | Where-Object { $_ -match '^\d{1,2}:\d{2}$' })
+            if (-not $publishTimes.Count) { $publishTimes = @("09:00", "16:00") }
         }
         if ($line -match '^\s*ENCUESTAS_CHECK_TIME\s*=\s*(.+)\s*$') {
             $checkTime = $Matches[1].Trim()
@@ -59,23 +60,42 @@ function Register-DailyTask([string]$name, [string]$script, [datetime]$at, [stri
         -Description $desc | Out-Null
 }
 
-Register-DailyTask `
-    $CheckTask `
-    $CheckScript `
-    (Parse-Hm $checkTime) `
-    "Encuestas FV: verifica foto de la proxima encuesta a las $checkTime"
+# Quitar tareas viejas de un solo horario
+foreach ($old in @("AsistenteWP-Encuestas", "AsistenteWP-Encuestas-Check")) {
+    $existing = Get-ScheduledTask -TaskName $old -ErrorAction SilentlyContinue
+    if ($existing) {
+        Unregister-ScheduledTask -TaskName $old -Confirm:$false
+    }
+}
 
-Register-DailyTask `
-    $PublishTask `
-    $PublishScript `
-    (Parse-Hm $publishTime) `
-    "Encuestas FV: 1 pendiente a WP + webhook fvdigital a las $publishTime"
+# Quitar slots previos AsistenteWP-Encuestas-0900 etc.
+Get-ScheduledTask -ErrorAction SilentlyContinue |
+    Where-Object { $_.TaskName -like "AsistenteWP-Encuestas-*" } |
+    ForEach-Object { Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false }
 
-Write-Host "Tareas programadas instaladas:"
-Write-Host "  Check:    $CheckTask @ $checkTime"
-Write-Host "  Publish:  $PublishTask @ $publishTime"
-Write-Host "  Logs:     $(Join-Path $Root 'logs\encuestas.log')"
+$i = 0
+foreach ($t in $publishTimes) {
+    $i++
+    $slot = ($t -replace ":", "")
+    $name = "AsistenteWP-Encuestas-$slot"
+    Register-DailyTask `
+        $name `
+        $PublishScript `
+        (Parse-Hm $t) `
+        "Encuestas tematicas FV (ALPHA + WP + redes) a las $t"
+    Write-Host "  Publish:  $name @ $t"
+}
+
+if ($checkTime -and $checkTime -match '^\d{1,2}:\d{2}$') {
+    Register-DailyTask `
+        "AsistenteWP-Encuestas-Check" `
+        $CheckScript `
+        (Parse-Hm $checkTime) `
+        "Encuestas FV: verifica foto de la proxima encuesta a las $checkTime"
+    Write-Host "  Check:    AsistenteWP-Encuestas-Check @ $checkTime"
+}
+
 Write-Host ""
-Write-Host "Probar check:   npm run encuestas:check"
-Write-Host "Probar 1 dia:   npm run encuestas -- --daily"
-Write-Host "Quitar tareas:  npm run encuestas:cron:uninstall"
+Write-Host "Tareas instaladas. Logs: $(Join-Path $Root 'logs\encuestas.log')"
+Write-Host "Probar: npm run encuestas -- --daily --tema"
+Write-Host "Quitar: npm run encuestas:cron:uninstall"

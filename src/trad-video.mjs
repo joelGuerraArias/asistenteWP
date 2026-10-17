@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  isMistralAvailable,
+  looksSpanishText,
+  noteMistralFailure,
   synthesizeSpeechBuffer,
   transcribeAudioAuto,
   translateTextWithMistral,
@@ -92,23 +95,14 @@ function formatAssTime(seconds = 0) {
   return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
-/** ¿El audio ya está en español? */
+/** ¿El audio ya está en español? El idioma del STT manda; el texto solo si no hay idioma. */
 export function isSpanishAudio(language, transcript = "") {
   const lang = String(language || "").toLowerCase().trim();
-  if (/^es(-|$)/.test(lang) || lang === "spa" || lang === "spanish") return true;
-
-  const t = String(transcript || "").toLowerCase();
-  if (t.length < 24) return false;
-  const words = t.split(/\s+/).filter(Boolean);
-  if (words.length < 6) return false;
-
-  const spanishHits = (
-    t.match(
-      /\b(el|la|los|las|de|del|que|en|un|una|por|con|para|es|al|se|no|más|mas|como|pero|su|sus|este|esta|hay|fue|son|muy|también|tambien|sobre|entre|cuando|donde|qué|que|cómo|como|porque|hace|desde|durante|según|segun|sin|bien|está|esta|están|estan|tiene|tienen|hacer|hecho|dice|dijo|ser|era|van|voy|nos|les|yo|tú|tu|ella|ellos|ellas|aquí|aqui|allí|alli|hoy|ahora|todo|toda|todos|todas|mismo|misma|otro|otra|mundo|país|pais|gobierno|presidente|personas|gente|video|noticia|república|republica|dominicana)\b/g
-    ) || []
-  ).length;
-
-  return spanishHits / words.length >= 0.07;
+  if (/^es(-|$)/.test(lang) || lang === "spa" || lang === "spanish" || lang === "español") {
+    return true;
+  }
+  if (lang) return false;
+  return looksSpanishText(transcript);
 }
 
 function overlayPathResolved() {
@@ -149,7 +143,7 @@ function wrapHeadline(text = "", maxChars = 38, maxLines = 3) {
 }
 
 /** Titular en español: frase completa con sujeto + verbo + idea cerrada. */
-async function generateTradHeadline({ transcript, title, description }) {
+export async function generateTradHeadline({ transcript, title, description }) {
   const body = [title, description, transcript]
     .filter(Boolean)
     .join("\n")
@@ -168,46 +162,80 @@ async function generateTradHeadline({ transcript, title, description }) {
   };
 
   if (!body || body.length < 12) return fallback();
-  if (!config.audio.mistralApiKey) return fallback();
 
-  const model = config.audio.mistralChatModel || "mistral-small-latest";
-  const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.audio.mistralApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.4,
-      messages: [
-        {
-          role: "user",
-          content: `Eres editor de FV Digital (República Dominicana). Redacta UN titular periodístico en español sobre este video.
+  const prompt = `Eres editor de FV Digital (República Dominicana). Redacta UN titular periodístico en español sobre este video.
 
 Reglas OBLIGATORIAS:
 1. Debe ser UNA FRASE COMPLETA con lógica clara (sujeto + verbo + complemento).
-2. NUNCA cortes la idea a medias (mal: "Gobierno anuncia nuevas"; bien: "Gobierno anuncia nuevas medidas económicas para el próximo año").
-3. Entre 8 y 18 palabras. Si hace falta más, prioriza completar el sentido.
+2. NUNCA cortes la idea a medias (mal: "Comunicadora denuncia falta de atención en hospital por no"; bien: "Comunicadora Fogón denuncia abandono en hospital Ney Arias").
+3. Entre 6 y 12 palabras. MÁXIMO 12. Si hace falta, reescribe más corto pero cierra el sentido.
 4. Debe reflejar el hecho o tema principal del audio.
 5. Sin comillas, hashtags, emojis ni signos de admiración.
 6. Conserva nombres propios relevantes.
-7. Devuelve SOLO el titular, nada más.
+7. No termines en: de, del, la, el, en, con, para, por, y, o, a, un, una, no, ni, que…
+8. Devuelve SOLO el titular, nada más.
 
 Contenido del video:
 ---
 ${body}
----`,
-        },
-      ],
-    }),
-  });
+---`;
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) return fallback();
+  async function chatHeadline(url, apiKey, model) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.4,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data?.message || data?.error?.message || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return String(data?.choices?.[0]?.message?.content || "").trim();
+  }
 
-  let headline = String(data?.choices?.[0]?.message?.content || "")
-    .trim()
+  let raw = "";
+  try {
+    if (isMistralAvailable()) {
+      raw = await chatHeadline(
+        "https://api.mistral.ai/v1/chat/completions",
+        config.audio.mistralApiKey,
+        config.audio.mistralChatModel || "mistral-small-latest"
+      );
+    } else if (config.audio.openaiApiKey) {
+      raw = await chatHeadline(
+        "https://api.openai.com/v1/chat/completions",
+        config.audio.openaiApiKey,
+        config.audio.openaiChatModel || "gpt-4o-mini"
+      );
+    } else {
+      return fallback();
+    }
+  } catch (error) {
+    noteMistralFailure(error);
+    if (config.audio.openaiApiKey && !/openai/i.test(String(error.message))) {
+      try {
+        raw = await chatHeadline(
+          "https://api.openai.com/v1/chat/completions",
+          config.audio.openaiApiKey,
+          config.audio.openaiChatModel || "gpt-4o-mini"
+        );
+      } catch {
+        return fallback();
+      }
+    } else {
+      return fallback();
+    }
+  }
+
+  let headline = raw
     .replace(/^["'`]|["'`]$/g, "")
     .replace(/\n+/g, " ")
     .replace(/\s+/g, " ")
@@ -216,19 +244,43 @@ ${body}
 
   // Evitar titulares truncados tipo "..." o cortados en preposición
   if (/(\.\.\.|…)$/.test(headline)) headline = headline.replace(/(\.\.\.|…)$/, "").trim();
-  if (/\b(de|del|la|el|los|las|en|con|para|por|y|o|a|un|una)$/i.test(headline)) {
+  if (
+    /\b(de|del|la|el|los|las|en|con|para|por|y|o|a|un|una|no|ni|que|se|su)$/i.test(
+      headline.replace(/[¿?¡!.,;:]+$/g, "")
+    )
+  ) {
     return fallback();
   }
 
-  const words = headline.split(/\s+/).filter(Boolean).length;
-  if (headline && words >= 6 && words <= 22 && headline.length <= 140) {
+  let words = headline.split(/\s+/).filter(Boolean);
+  if (words.length > 12) {
+    const trimmed = words.slice(0, 12);
+    while (
+      trimmed.length > 4 &&
+      /\b(de|del|la|el|los|las|en|con|para|por|y|o|a|un|una|no|ni|que|se|su)$/i.test(
+        trimmed[trimmed.length - 1]
+      )
+    ) {
+      trimmed.pop();
+    }
+    headline = trimmed.join(" ");
+    words = headline.split(/\s+/).filter(Boolean);
+  }
+  if (!(headline && words.length >= 5 && words.length <= 12 && headline.length <= 120)) {
+    headline = fallback();
+  }
+
+  // Lower-third: forzar ≤12 palabras e idea completa (reescritura si hace falta)
+  try {
+    const { composeCardHeadline } = await import("./deepseek.mjs");
+    return await composeCardHeadline(headline, body, { lang: "es" });
+  } catch {
     return headline;
   }
-  return fallback();
 }
 
 /** ASS: typewriter — delay, escribe en N s, visible al menos M s en pantalla. */
-function buildTypewriterAss(
+export function buildTypewriterAss(
   headline,
   {
     width = 1080,
@@ -282,9 +334,30 @@ function buildTypewriterAss(
   return [...header, ...events, ""].join("\n");
 }
 
+/** Títulos que pone yt-dlp/plataforma ("Video by x", "Reel de x", "123 views · …"), no del autor. */
+function isGenericPlatformTitle(title = "") {
+  const t = String(title || "").trim();
+  if (!t) return true;
+  return (
+    /^(video|vídeo|reel|reels|post|clip|short|publicación|publicacion)\b/i.test(t) ||
+    /\b(instagram|facebook|tiktok|youtube)\b.*\b(video|reel|post)\b/i.test(t) ||
+    /^[\d.,]+\s*[kmb]?\s*(views|reactions|vistas|reproducciones|me gusta)\b/i.test(t)
+  );
+}
+
+/** Texto narrable: sin hashtags, menciones, links ni emojis. */
+function cleanForNarration(text = "") {
+  return String(text || "")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/(^|\s)[#@][\p{L}\p{N}_.]+/gu, " ")
+    .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function captionFromMeta({ title, description }) {
-  const desc = String(description || "").replace(/\s+/g, " ").trim();
-  const tit = String(title || "").replace(/\s+/g, " ").trim();
+  const desc = cleanForNarration(description);
+  const tit = isGenericPlatformTitle(title) ? "" : cleanForNarration(title);
   if (!desc && !tit) return "";
   if (desc && tit) {
     if (desc.toLowerCase().startsWith(tit.toLowerCase().slice(0, 24))) return desc;
@@ -326,7 +399,28 @@ async function probeHasAudio(filePath) {
   });
 }
 
-async function renderReel916({
+async function probeDurationSec(filePath) {
+  const bin = resolveFfmpeg().replace(/ffmpeg(\.exe)?$/i, "ffprobe$1");
+  const probeBin = existsSync(bin) ? bin : "ffprobe";
+  return new Promise((resolve) => {
+    const child = spawn(
+      probeBin,
+      ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", filePath],
+      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    let out = "";
+    child.stdout.on("data", (d) => {
+      out += d.toString();
+    });
+    child.on("close", () => {
+      const n = Number.parseFloat(out.trim());
+      resolve(Number.isFinite(n) && n > 0 ? n : 0);
+    });
+    child.on("error", () => resolve(0));
+  });
+}
+
+export async function renderReel916({
   videoIn,
   videoOut,
   voicePath = null,
@@ -342,7 +436,19 @@ async function renderReel916({
   const dub = Boolean(voicePath);
   const useAss = assPath && existsSync(assPath);
 
-  const inputs = ["-y", "-i", videoIn];
+  // Voz más larga que el video: el video se repite hasta que termine la voz.
+  let loopUntilSec = 0;
+  if (dub) {
+    const [videoSec, voiceSec] = await Promise.all([
+      probeDurationSec(videoIn),
+      probeDurationSec(voicePath),
+    ]);
+    if (videoSec > 0 && voiceSec > videoSec + 0.2) loopUntilSec = voiceSec + 0.4;
+  }
+
+  const inputs = ["-y"];
+  if (loopUntilSec) inputs.push("-stream_loop", "-1");
+  inputs.push("-i", videoIn);
   if (dub) inputs.push("-i", voicePath);
   if (useOverlay) inputs.push("-i", overlayPath);
 
@@ -400,7 +506,8 @@ async function renderReel916({
     "-movflags",
     "+faststart",
   ];
-  if (dub) args.push("-shortest");
+  if (loopUntilSec) args.push("-t", loopUntilSec.toFixed(2));
+  else if (dub) args.push("-shortest");
   args.push(videoOut);
 
   await runFfmpeg(args, { timeoutMs: 420_000 });
@@ -447,12 +554,26 @@ export async function inspectTradVideo(sourceUrl, { onStatus } = {}) {
         ]);
         const audioBuf = await readFile(audioOrig);
         if (audioBuf.length >= 500) {
-          onStatus?.("📝 Detectando idioma (Mistral STT)…");
-          stt = await transcribeAudioAuto(audioBuf, "mp3");
-          transcript = stt.text || "";
+          try {
+            stt = await transcribeAudioAuto(audioBuf, "mp3", { onStatus });
+            transcript = stt.text || "";
+            if (!transcript.trim()) {
+              onStatus?.(
+                "⚠️ STT no devolvió texto. Puedes usar caption o pegar un guion."
+              );
+            }
+          } catch (error) {
+            onStatus?.(
+              `⚠️ No pude transcribir el audio (${String(error.message || error).slice(0, 140)}). Usa caption o pega texto.`
+            );
+          }
+        } else {
+          onStatus?.("⚠️ Audio extraído demasiado corto / vacío.");
         }
-      } catch {
-        // Pista presente pero no transcribible
+      } catch (error) {
+        onStatus?.(
+          `⚠️ No pude extraer/transcribir audio (${String(error.message || error).slice(0, 120)}).`
+        );
       }
     }
 
@@ -498,8 +619,12 @@ export async function inspectTradVideo(sourceUrl, { onStatus } = {}) {
  * Fase 2: según modo elegido por el usuario.
  * - translate_audio: dobla desde STT (o overlayOnly si ya es ES)
  * - from_caption: SIEMPRE traduce caption a español y luego TTS
+ * - from_text: texto pegado → traduce a ES → TTS + seed de caption
  */
-export async function continueTradJob(job, { mode, onStatus } = {}) {
+export async function continueTradJob(
+  job,
+  { mode, customText: customTextOpt, onStatus } = {}
+) {
   if (!job?.videoIn || !job?.workDir) {
     throw new Error("No hay inspección /trad pendiente.");
   }
@@ -513,8 +638,15 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
   const headlineVisibleSeconds = Number(config.trad?.headlineVisibleSeconds ?? 10);
 
   const chosen = String(mode || "").trim();
-  if (chosen !== "translate_audio" && chosen !== "from_caption") {
-    throw new Error('Modo inválido. Usa "translate_audio" o "from_caption".');
+  const customText = String(customTextOpt || job.customText || "").trim();
+  if (
+    chosen !== "translate_audio" &&
+    chosen !== "from_caption" &&
+    chosen !== "from_text"
+  ) {
+    throw new Error(
+      'Modo inválido. Usa "translate_audio", "from_caption" o "from_text".'
+    );
   }
 
   try {
@@ -525,8 +657,27 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
     let mixOriginal = false;
     let translation = "";
     let language = job.sttLanguage || null;
+    let socialCaptionSeed = "";
 
-    if (chosen === "from_caption") {
+    if (chosen === "from_text") {
+      if (customText.length < 8) {
+        throw new Error("El texto pegado es muy corto. Envía un párrafo completo.");
+      }
+      sourceText = customText;
+      onStatus?.("🌐 Traduciendo tu texto al español…");
+      translation = await translateTextWithMistral(sourceText, {
+        context: "guión pegado por el usuario para narración y caption en español",
+        onStatus,
+      });
+      if (!translation) {
+        throw new Error("No pude traducir el texto al español.");
+      }
+      needsVoice = true;
+      mixOriginal = Boolean(job.hasAudioTrack);
+      language = "es";
+      captionFallback = true;
+      socialCaptionSeed = translation;
+    } else if (chosen === "from_caption") {
       if (isEmptyTranscript(job.caption)) {
         throw new Error("Este video no tiene caption/descripción para narrar.");
       }
@@ -535,6 +686,7 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
       onStatus?.("🌐 Traduciendo caption al español…");
       translation = await translateTextWithMistral(sourceText, {
         context: "caption de video para narración en español",
+        onStatus,
       });
       if (!translation) {
         throw new Error("No pude traducir el caption al español.");
@@ -542,10 +694,11 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
       needsVoice = true;
       mixOriginal = Boolean(job.hasAudioTrack);
       language = "es";
+      socialCaptionSeed = translation;
     } else {
       if (isEmptyTranscript(job.transcript)) {
         throw new Error(
-          "No hay audio usable para traducir. Elige «Crear audio desde el caption»."
+          "No hay audio usable para traducir. Elige caption o pega un texto."
         );
       }
       sourceText = job.transcript;
@@ -555,15 +708,18 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
         translation = "";
         language = job.sttLanguage || "es";
         onStatus?.("🇪🇸 Audio ya en español — solo reel 9:16…");
+        socialCaptionSeed = sourceText;
       } else {
         onStatus?.("🌐 Traduciendo audio al español…");
         translation = await translateTextWithMistral(sourceText, {
           context: "guión de video para doblaje",
+          onStatus,
         });
         if (!translation) throw new Error("Traducción vacía.");
         needsVoice = true;
         mixOriginal = true;
         language = "es";
+        socialCaptionSeed = translation;
       }
     }
 
@@ -571,12 +727,13 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
     onStatus?.("📰 Generando titular del video…");
     let headline = await generateTradHeadline({
       transcript: headlineSeed,
-      title: job.title,
+      title: isGenericPlatformTitle(job.title) ? "" : job.title,
       description: job.description,
     });
     if (headline) {
       headline = await translateTextWithMistral(headline, {
         context: "titular de video en español",
+        onStatus,
       });
     }
 
@@ -590,14 +747,11 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
     if (ass) await writeFile(job.assPath, ass, "utf8");
 
     if (needsVoice) {
-      onStatus?.(
-        captionFallback
-          ? "🗣️ Generando voz pabmatos desde el caption (ES)…"
-          : "🗣️ Generando voz pabmatos (Mistral TTS)…"
-      );
+      onStatus?.("🗣️ Generando narración…");
       const voiceBuf = await synthesizeSpeechBuffer(translation, {
         voiceId,
         preferMistral: true,
+        onStatus,
       });
       await writeFile(job.voicePath, voiceBuf);
     }
@@ -606,6 +760,8 @@ export async function continueTradJob(job, { mode, onStatus } = {}) {
       ...job,
       step: "ask_headline",
       sourceMode: chosen,
+      customText: chosen === "from_text" ? customText : job.customText || "",
+      socialCaptionSeed,
       voicePath: needsVoice ? job.voicePath : null,
       assPath: ass ? job.assPath : null,
       mixOriginal,
@@ -691,6 +847,8 @@ export async function finalizeTradJob(
     language: job.language,
     overlayOnly: job.overlayOnly,
     captionFallback: job.captionFallback,
+    sourceMode: job.sourceMode,
+    socialCaptionSeed: job.socialCaptionSeed || "",
     includeHeadline: Boolean(includeHeadline && assPath),
     r2KeyHint: job.r2KeyHint,
   };

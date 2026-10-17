@@ -19,6 +19,7 @@ const ACTIONS = [
   "remotion",
   "video_status",
   "trad",
+  "dub",
   "video_url",
   "noticia_ocr",
   "nota",
@@ -189,6 +190,15 @@ export function matchCommandIntentRegex(text = "") {
     return { action: "trad", raw };
   }
 
+  if (
+    /^\/dub\b/i.test(raw) ||
+    /\bdub\b/i.test(lower) ||
+    /elevenlabs\s*dub/i.test(lower) ||
+    /dobla(r)?\s+(?:con\s+)?eleven/i.test(lower)
+  ) {
+    return { action: "dub", raw };
+  }
+
   const video = parseVideoIntent(raw);
   if (video) {
     if (video.tool === "status") return { action: "video_status", raw };
@@ -235,7 +245,8 @@ Guía:
 - heygen: video con presentador/avatar
 - hyperframes / remotion: tools de video
 - video_status: estado de herramientas de video
-- trad: traducir/doblar video o texto
+- trad: traducir/doblar video o texto (Mistral TTS)
+- dub: doblar video con ElevenLabs Dubbing API
 - noticia_ocr: publicar desde captura de pantalla
 - nota: nota desde PDF/documento
 - recortar: recortar imagen

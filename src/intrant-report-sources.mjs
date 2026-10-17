@@ -10,6 +10,15 @@ import {
 } from "./google-alerts-parse.mjs";
 import { filterForClient, loadAnalisisHoy } from "./informe-parse.mjs";
 import { calendarYmd, toYmd } from "./news-date.mjs";
+import {
+  fetchInstagramDigestFromGmail,
+  fetchYoutubeDigestFromGmail,
+} from "./reporte-gmail-digests.mjs";
+import { igSettings, postKey, searchInstagram } from "./instagram-search.mjs";
+import { fetchYoutubeApiItems, youtubeKey } from "./youtube-report.mjs";
+import { fetchXDayItems } from "./x-report.mjs";
+import { isFresh, parseLooseDateTime, parseStamp } from "./freshness.mjs";
+import { shortcodeDate } from "./instagram-search.mjs";
 
 export const SOURCE_LABELS = {
   gmail: "Gmail / Google Alerts",
@@ -101,24 +110,13 @@ function isKnownIntrantAccount(name = "") {
   return KNOWN_INTRANT_ACCOUNTS.some((a) => n === a || n.includes(a));
 }
 
-/** Ventana social para reporte matutino: hoy + ayer (DO). */
-function socialDateWindow(dateYmd) {
-  if (!dateYmd) return null;
-  const [y, m, d] = dateYmd.split("-").map(Number);
-  const dt = new Date(y, m - 1, d);
-  const prev = new Date(dt);
-  prev.setDate(prev.getDate() - 1);
-  const py = prev.getFullYear();
-  const pm = String(prev.getMonth() + 1).padStart(2, "0");
-  const pd = String(prev.getDate()).padStart(2, "0");
-  return new Set([dateYmd, `${py}-${pm}-${pd}`]);
-}
-
+/** Ventana social Apify fallback: hoy + N días (REPORTE_SOCIAL_DAYS, default 3). */
 function inSocialWindow(atYmd, dateYmd) {
   if (!dateYmd) return true;
   if (!atYmd) return true; // sin fecha: no descartar de golpe
-  const win = socialDateWindow(dateYmd);
-  return win.has(atYmd);
+  const days = config.reporte?.socialSearchDays || 3;
+  const oldest = ymdDaysAgo(dateYmd, days);
+  return atYmd >= oldest && atYmd <= dateYmd;
 }
 
 function isSocialRelevant(blob = "", account = "") {
@@ -159,16 +157,91 @@ function clip(text = "", max = 220) {
   return `${(sp > 40 ? cut.slice(0, sp) : cut).trim()}…`;
 }
 
-function item({ source, medio, title, summary, url, at, relevance }) {
+function item({
+  source,
+  medio,
+  title,
+  summary,
+  url,
+  at,
+  relevance,
+  term = "",
+  tono = "",
+  mediaType = "",
+  mediaKind = "",
+  videoUrl = "",
+  txtUrl = "",
+  archivo = "",
+  puntos = "",
+  relevanciaRaw = "",
+} = {}) {
+  const media = String(videoUrl || url || "").trim();
   return {
     source,
     medio: String(medio || "").trim() || SOURCE_LABELS[source] || source,
     title: String(title || "").trim() || "(sin título)",
     summary: clip(summary || title || ""),
     relevance: relevance || "media",
-    url: String(url || "").trim(),
+    url: media,
     at: String(at || "").trim(),
+    term: String(term || "").trim().toLowerCase(),
+    tono: String(tono || "").trim() || "",
+    mediaType: String(mediaType || "").trim(),
+    mediaKind: String(mediaKind || "").trim(),
+    videoUrl: media,
+    txtUrl: String(txtUrl || "").trim(),
+    archivo: String(archivo || "").trim(),
+    puntos: clip(puntos || "", 500),
+    relevanciaRaw: String(relevanciaRaw || "").trim(),
   };
+}
+
+function titleFallback(page = "") {
+  return page ? `${page} — publicación` : "Publicación Facebook";
+}
+
+function fromAnalisis(fallbackChannel, analisisItem, dateYmd) {
+  const isAudio =
+    analisisItem.mediaType === "audio" || analisisItem.channel === "radio";
+  const source = isAudio ? "radio" : "tv";
+  const mediaUrl = analisisItem.videoUrl || analisisItem.txtUrl || "";
+  let mediaKind = analisisItem.mediaKind || "";
+  if (!mediaKind) {
+    if (isAudio) {
+      mediaKind = /\.wav\b/i.test(`${analisisItem.archivo || ""} ${mediaUrl}`)
+        ? "wav"
+        : /\.mp3\b/i.test(mediaUrl)
+          ? "mp3"
+          : "audio";
+    } else {
+      mediaKind = "mp4";
+    }
+  }
+  return item({
+    source: source || fallbackChannel,
+    medio: analisisItem.medioNombre || analisisItem.medio,
+    title: analisisItem.tema || analisisItem.term,
+    summary:
+      analisisItem.contexto ||
+      analisisItem.tema ||
+      analisisItem.puntos ||
+      analisisItem.motivo,
+    url: mediaUrl,
+    videoUrl: mediaUrl,
+    txtUrl: analisisItem.txtUrl || "",
+    at: dateYmd,
+    term: analisisItem.term || "",
+    tono: analisisItem.tono || "",
+    mediaType: isAudio ? "audio" : analisisItem.mediaType || "video",
+    mediaKind,
+    archivo: analisisItem.archivo || "",
+    puntos: analisisItem.puntos || "",
+    relevanciaRaw: analisisItem.relevancia || "",
+    relevance: relevanceFromText(
+      `${analisisItem.tema} ${analisisItem.contexto}`,
+      analisisItem.relevancia
+    ),
+  });
 }
 
 function sameDay(at, ymd) {
@@ -308,7 +381,24 @@ export async function fetchXItems({ dateYmd } = {}) {
   return { items };
 }
 
-export async function fetchYoutubeItems({ dateYmd } = {}) {
+function mapDigestToItems(rows, source) {
+  return (rows || []).map((r) =>
+    item({
+      source: r.source || source,
+      medio: r.medio,
+      title: r.title,
+      summary: r.summary || r.title,
+      url: r.url,
+      at: r.at,
+      relevance:
+        source === "instagram" || /intrant|digesett/i.test(`${r.medio} ${r.title}`)
+          ? "alta"
+          : relevanceFromText(`${r.title} ${r.summary || ""}`),
+    })
+  );
+}
+
+async function fetchYoutubeFromApify({ dateYmd } = {}) {
   const data = await fetchJson(withToken(config.reporte.youtubeLastUrl), {
     label: "YouTube Apify",
   });
@@ -317,7 +407,8 @@ export async function fetchYoutubeItems({ dateYmd } = {}) {
     const title = v.title || "";
     if (!isSpanishTitle(title)) continue;
     const at = pickDate(v.date || v.uploadDate || v.publishedAt);
-    if (dateYmd && at && at !== dateYmd) continue;
+    // Regla 24 h: hora exacta de publicación obligatoria
+    if (!isFresh(parseStamp(v.date || v.uploadDate || v.publishedAt))) continue;
     const blob = `${title} ${v.text || ""} ${v.channelName || ""} ${v.input || ""}`;
     if (!mobilityHit(blob) && !/intrant|digesett/i.test(blob)) continue;
     items.push(
@@ -335,6 +426,21 @@ export async function fetchYoutubeItems({ dateYmd } = {}) {
   return items;
 }
 
+/**
+ * YouTube: digest Gmail del día (Apify mailed) primero; GET Apify last como fallback.
+ * No dispara corridas nuevas. No toca alertas/sheet.
+ */
+export async function fetchYoutubeItems({ dateYmd } = {}) {
+  try {
+    const digest = await fetchYoutubeDigestFromGmail({ dateYmd });
+    // Regla 24 h: el digest no trae hora de publicación de cada video → no se usa
+    if (digest.length) console.warn(`YouTube digest Gmail: ${digest.length} ítems sin hora verificable (omitidos)`);
+  } catch (error) {
+    console.warn(`YouTube digest Gmail: ${error.message}`);
+  }
+  return fetchYoutubeFromApify({ dateYmd });
+}
+
 function igCaption(p) {
   return (
     p.caption ||
@@ -346,7 +452,7 @@ function igCaption(p) {
   );
 }
 
-export async function fetchInstagramItems({ dateYmd } = {}) {
+async function fetchInstagramFromApify({ dateYmd } = {}) {
   const data = await fetchJson(withToken(config.reporte.instagramLastUrl), {
     label: "Instagram Apify",
   });
@@ -360,7 +466,11 @@ export async function fetchInstagramItems({ dateYmd } = {}) {
     const at = pickDate(
       p.timestamp || p.takenAt || p.date || p.time || p.createdAt
     );
-    if (dateYmd && at && !inSocialWindow(at, dateYmd)) continue;
+    // Regla 24 h: hora exacta (dataset o código del post)
+    const igTs =
+      parseStamp(p.timestamp || p.takenAt || p.date || p.time || p.createdAt) ||
+      shortcodeDate(postKey(p.url || ""));
+    if (!isFresh(igTs)) continue;
     const blob = `${caption} ${owner}`;
     if (!isSocialRelevant(blob, owner)) continue;
     items.push(
@@ -378,6 +488,24 @@ export async function fetchInstagramItems({ dateYmd } = {}) {
     );
   }
   return items;
+}
+
+/**
+ * Instagram: digest Gmail del día primero; GET Apify last como fallback.
+ * No toca alertas/sheet.
+ */
+export async function fetchInstagramItems({ dateYmd } = {}) {
+  try {
+    const digest = await fetchInstagramDigestFromGmail({ dateYmd });
+    if (digest.length) {
+      // Regla 24 h: fecha exacta desde el código del post (/p/CODIGO)
+      const fresh = mapDigestToItems(digest, "instagram").filter((it) => isFresh(shortcodeDate(postKey(it.url || ""))));
+      if (fresh.length) return fresh;
+    }
+  } catch (error) {
+    console.warn(`Instagram digest Gmail: ${error.message}`);
+  }
+  return fetchInstagramFromApify({ dateYmd });
 }
 
 export async function refreshInstagramDataset() {
@@ -479,7 +607,8 @@ export async function fetchFacebookItems({ dateYmd } = {}) {
     const text = fbText(p);
     const page = fbAuthor(p);
     const at = pickDate(p.time || p.timestamp || p.date || p.createdAt);
-    if (dateYmd && at && !inFacebookWindow(at, dateYmd)) continue;
+    // Regla 24 h: hora exacta de publicación obligatoria
+    if (!isFresh(parseStamp(p.time || p.timestamp || p.date || p.createdAt))) continue;
     const blob = `${text} ${page}`;
     if (!isFacebookIntrantMention(blob)) continue;
     items.push(
@@ -499,40 +628,53 @@ export async function fetchFacebookItems({ dateYmd } = {}) {
   return items;
 }
 
-function titleFallback(page = "") {
-  return page ? `${page} — publicación` : "Publicación Facebook";
-}
-
-function fromAnalisis(channel, analisisItem, dateYmd) {
-  return item({
-    source: channel,
-    medio: analisisItem.medioNombre || analisisItem.medio,
-    title: analisisItem.tema || analisisItem.term,
-    summary: analisisItem.contexto || analisisItem.tema || analisisItem.puntos,
-    url: analisisItem.videoUrl || analisisItem.txtUrl || "",
-    at: dateYmd,
-    relevance: relevanceFromText(
-      `${analisisItem.tema} ${analisisItem.contexto}`,
-      analisisItem.relevancia
-    ),
-  });
-}
-
+/** TV/radio: Analisishoy de hoy + día anterior (ventana del reporte matutino). */
 export async function fetchTvRadioItems({ date, dateYmd, channel }) {
-  try {
-    const analisis = loadAnalisisHoy(date, channel);
-    const { items } = filterForClient(analisis, "intrant", channel);
-    return {
-      items: items.map((it) => fromAnalisis(channel, it, dateYmd)),
-      missing: false,
-      path: analisis.path,
-    };
-  } catch (error) {
-    if (/No encontré/i.test(error.message)) {
-      return { items: [], missing: true, error: error.message };
-    }
-    throw error;
+  const base = date instanceof Date ? new Date(date) : new Date(dateYmd || Date.now());
+  if (Number.isNaN(base.getTime())) {
+    throw new Error("Fecha inválida para TV/radio");
   }
+  const prev = new Date(base);
+  prev.setDate(prev.getDate() - 1);
+
+  const paths = [];
+  const collected = [];
+  let lastMissing = "";
+
+  for (const d of [base, prev]) {
+    const ymd = calendarYmd(d);
+    try {
+      const analisis = loadAnalisisHoy(d, channel);
+      paths.push(analisis.path);
+      const { items } = filterForClient(analisis, "intrant", channel);
+      for (const it of items) {
+        // Regla 24 h: hora del clip (archivo / medio / hora / análisis). Sin hora: solo si el archivo es de HOY.
+        const ts =
+          parseLooseDateTime(it.archivo || "") ||
+          parseLooseDateTime(it.medioFecha || "", ymd) ||
+          parseLooseDateTime(it.analyzedAt || "", ymd);
+        const todayYmd = calendarYmd(new Date());
+        if (ts ? !isFresh(ts) : ymd !== todayYmd) continue;
+        collected.push(fromAnalisis(channel, it, ymd));
+      }
+    } catch (error) {
+      if (/No encontré/i.test(error.message)) {
+        lastMissing = error.message;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (!paths.length) {
+    return { items: [], missing: true, error: lastMissing || "Sin Analisishoy" };
+  }
+
+  return {
+    items: dedupe(collected),
+    missing: false,
+    path: paths.join(" | "),
+  };
 }
 
 function dedupe(items) {
@@ -581,11 +723,31 @@ export async function collectReporteSources({
   const gmail = await run("gmail", () => fetchGmailItems({ dateYmd, onStatus }));
   if (gmail) bySource.gmail = gmail;
 
-  const x = await run("x", () => fetchXItems({ dateYmd }));
+  // X: búsqueda combinada Latest+Top con paginación (x-report); items con forma del REPORTE
+  const x = await run("x", async () => {
+    const r = await fetchXDayItems({ date });
+    return r.skipped ? r : { items: r.items.map((t) => item(t)) };
+  });
   if (x?.skipped) skipped.push({ source: "x", reason: x.skipped });
   if (x?.items) bySource.x = x.items;
 
-  const yt = await run("youtube", () => fetchYoutubeItems({ dateYmd }));
+  // YouTube: API oficial si hay YOUTUBE_API_KEY (hoy + ayer); si no, digest Gmail / Apify como antes
+  const yt = youtubeKey()
+    ? await run("youtube", async () =>
+        (await fetchYoutubeApiItems({ date })).map((v) =>
+          item({
+            source: "youtube",
+            medio: v.medio,
+            title: v.title,
+            summary: `${v.summary} (👁 ${v.views} · ❤ ${v.likes} · 💬 ${v.comments})`,
+            url: v.url,
+            at: v.at || dateYmd,
+            relevance: v.relevance,
+            mediaKind: "video",
+          })
+        )
+      )
+    : await run("youtube", () => fetchYoutubeItems({ dateYmd }));
   if (yt) bySource.youtube = yt;
 
   if (refreshInstagram) {
@@ -593,6 +755,33 @@ export async function collectReporteSources({
   }
   const ig = await run("instagram", () => fetchInstagramItems({ dateYmd }));
   if (ig) bySource.instagram = ig;
+
+  // Instagram por buscadores (menciones explícitas de INTRANT en otros perfiles; hoy + ayer por defecto)
+  const igSearch = await run("instagram", async () => {
+    const days = Math.max(0, Number(process.env.IG_REPORT_DAYS ?? 1));
+    const res = await searchInstagram({ now: date, settings: { ...igSettings(), days } });
+    return res.items;
+  });
+  if (igSearch?.length) {
+    const seen = new Set(bySource.instagram.map((it) => postKey(it.url || "")));
+    for (const it of igSearch) {
+      const k = postKey(it.url);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      bySource.instagram.push(
+        item({
+          source: "instagram",
+          medio: it.medio,
+          title: it.title,
+          summary: it.summary,
+          url: it.url,
+          at: it.at || dateYmd,
+          relevance: it.relevance,
+          mediaKind: it.mediaKind,
+        })
+      );
+    }
+  }
 
   if (refreshFacebook) {
     await run("facebook", () => refreshFacebookDataset());
@@ -602,13 +791,19 @@ export async function collectReporteSources({
 
   const tv = await run("tv", () => fetchTvRadioItems({ date, dateYmd, channel: "tv" }));
   if (tv?.missing) skipped.push({ source: "tv", reason: tv.error });
-  if (tv?.items) bySource.tv = tv.items;
+  if (tv?.items) {
+    // Analisishoy trae Video (.mp4) y Audio (.wav/.mp3); repartir por source
+    bySource.tv = tv.items.filter((it) => it.source === "tv");
+    bySource.radio.push(...tv.items.filter((it) => it.source === "radio"));
+  }
 
   const radio = await run("radio", () =>
     fetchTvRadioItems({ date, dateYmd, channel: "radio" })
   );
   if (radio?.missing) skipped.push({ source: "radio", reason: radio.error });
-  if (radio?.items) bySource.radio = radio.items;
+  if (radio?.items) {
+    bySource.radio = dedupe([...bySource.radio, ...radio.items]);
+  }
 
   const items = dedupe(Object.values(bySource).flat());
   const counts = Object.fromEntries(

@@ -1,4 +1,5 @@
 import { encuestasDailyLimit, runEncuestas, runEncuestasCheck } from "../src/encuestas.mjs";
+import { config } from "../src/config.mjs";
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
@@ -16,6 +17,11 @@ const limit = limitArg
     ? encuestasDailyLimit()
     : undefined;
 
+let mode = config.encuestas?.mode || "tema";
+if (args.includes("--tema")) mode = "tema";
+else if (args.includes("--personas")) mode = "personas";
+else if (args.includes("--auto")) mode = "auto";
+
 try {
   if (check) {
     const result = await runEncuestasCheck({ notify: !skipTelegram });
@@ -31,6 +37,7 @@ try {
     onlyId,
     limit,
     skipTelegram,
+    mode,
   });
   if (result?.noneNew) {
     console.log("Sin encuestas nuevas.");
@@ -39,12 +46,13 @@ try {
   const n = result?.published?.length || 0;
   const skip = result?.skipped?.length || 0;
   const errs = result?.errors?.length || 0;
+  const src = result?.source || mode;
   console.log(
     dryRun
-      ? `Dry-run OK: ${n} | omitidas: ${skip}`
+      ? `Dry-run OK [${src}]: ${n} | omitidas: ${skip}`
       : previewOnly
-        ? `Preview Telegram: ${n} | omitidas: ${skip} | errores: ${errs}`
-        : `Publicadas: ${n} | omitidas: ${skip} | errores: ${errs}`
+        ? `Preview Telegram [${src}]: ${n} | omitidas: ${skip} | errores: ${errs}`
+        : `Publicadas [${src}]: ${n} | omitidas: ${skip} | errores: ${errs}${result?.recycled ? " | cola reiniciada" : ""}`
   );
   if (errs && !n) process.exit(1);
 } catch (error) {

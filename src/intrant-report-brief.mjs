@@ -1,7 +1,7 @@
 /**
  * Brief ejecutivo Intrant vía DeepSeek (prompt de inteligencia reputacional).
  */
-import { deepseekChat } from "./deepseek.mjs";
+import { deepseekChat, sanitizeForDeepseek } from "./deepseek.mjs";
 import { CHANNEL_META } from "./intrant-report-pdf.mjs";
 
 export const EXECUTIVE_BRIEF_SYSTEM = `Actúa como un Director Senior de Inteligencia de Medios, Comunicación Estratégica, Reputación Institucional y Asuntos Públicos con experiencia preparando informes para Presidencia, ministros, directores generales y altos ejecutivos.
@@ -27,6 +27,8 @@ IMPORTANTE:
 - NO uses términos técnicos internos como Gmail, Google Alerts, Apify, RapidAPI, dataset ni nombres de scrapers.
 - En indicadores, llama a la prensa digital simplemente "Medios digitales".
 - PRIORIDAD ABSOLUTA — JUAN MANUEL MÉNDEZ: el informe debe ABRIR siempre con las noticias, entrevistas o videos que mencionen a Juan Manuel Méndez (nombramiento, declaración, entrevista, perfil). Esa cobertura va primero en: frase de panorama, Resumen Ejecutivo (párrafo 1), primera narrativa, primeras filas de Temas de mayor impacto y primeras Menciones prioritarias. Solo después el resto (fiscalización, DIGESETT, quejas ciudadanas, etc.). Si no hay piezas sobre Méndez en el material, decláralo en una línea y continúa con el resto.
+- TÉRMINO MÁS MENCIONADO DEL CICLO: si el material indica un término dominante (p. ej. digesett, intrant, motoristas, accidente), resáltarlo en negrita en el panorama y en el resumen ejecutivo (ej. **digesett**).
+- TELEVISIÓN / RADIO: el material incluye hallazgos de Analisishoy (clips .mp4 y audios .wav/.mp3). Cítalos con medio, tono y enlace cuando existan; no los ignores.
 
 TÍTULO DEL DOCUMENTO:
 
@@ -96,7 +98,13 @@ Máximo 5, estratégicas y vinculadas al monitoreo: Inmediata, Corto plazo, Segu
 16. ANEXO DE MONITOREO
 Resto de menciones: Fuente | Usuario/Medio | Tema | Resumen | Enlace
 
-ESTILO: firma internacional de inteligencia reputacional. Títulos claros, párrafos cortos, tablas markdown, jerarquía visual, negritas solo en conceptos importantes. Evitar redundancia, sensacionalismo y relleno.
+ESTILO: firma internacional de inteligencia reputacional. Títulos claros, párrafos cortos, tablas markdown, jerarquía visual. Evitar redundancia, sensacionalismo y relleno.
+
+NEGRITAS OBLIGATORIAS (markdown **doble asterisco**):
+- Todos los nombres propios de personas (nombre y apellido o nombre completo): p. ej. **Juan Manuel Méndez**, **Milton Morrison**.
+- Instituciones, organismos y cargos cuando se nombren como entidad: **INTRANT**, **DIGESETT**, **Ministerio de Interior y Policía**.
+- Medios, programas y canales citados: **Noticias SIN**, **Color Visión**, **CDN**.
+- No pongas en negrita frases enteras ni conceptos genéricos (tránsito, reputación, etc.); solo nombres propios / entidades.
 
 CRITERIO: un Director Ejecutivo con 3 minutos debe entender solo con Resumen, Semáforo, Narrativas, Alertas y Recomendaciones.
 
@@ -146,6 +154,53 @@ export function prioritizeMendezItems(items = []) {
 }
 
 /**
+ * Términos más mencionados en el ciclo (campo `term` de Analisishoy / menciones).
+ * @returns {{ term: string, count: number, ranked: { term: string, count: number }[] } | null}
+ */
+export function topMentionedTerms(items = [], { limit = 5 } = {}) {
+  const counts = new Map();
+  for (const it of items) {
+    const t = String(it.term || "")
+      .toLowerCase()
+      .trim();
+    if (!t || t.length < 3) continue;
+    counts.set(t, (counts.get(t) || 0) + 1);
+  }
+  // Si no hay `term`, intentar palabras clave en título de TV/radio
+  if (!counts.size) {
+    for (const it of items) {
+      if (it.source !== "tv" && it.source !== "radio") continue;
+      const blob = hay(`${it.title || ""} ${it.summary || ""}`);
+      for (const kw of [
+        "intrant",
+        "digesett",
+        "motoristas",
+        "motorista",
+        "accidente",
+        "pasaje",
+        "morrison",
+        "mendez",
+        "méndez",
+      ]) {
+        if (blob.includes(hay(kw))) {
+          const key = kw === "méndez" ? "mendez" : kw === "motorista" ? "motoristas" : kw;
+          counts.set(key, (counts.get(key) || 0) + 1);
+        }
+      }
+    }
+  }
+  const ranked = [...counts.entries()]
+    .map(([term, count]) => ({ term, count }))
+    .sort((a, b) => b.count - a.count || a.term.localeCompare(b.term));
+  if (!ranked.length) return null;
+  return {
+    term: ranked[0].term,
+    count: ranked[0].count,
+    ranked: ranked.slice(0, limit),
+  };
+}
+
+/**
  * Serializa el monitoreo bruto para el modelo (sin jerga interna).
  */
 export function buildRawMonitoringDump({
@@ -154,6 +209,7 @@ export function buildRawMonitoringDump({
   counts = {},
   items = [],
   periodLabel = "",
+  topTerms = null,
 } = {}) {
   const period =
     periodLabel ||
@@ -162,6 +218,10 @@ export function buildRawMonitoringDump({
   const ordered = prioritizeMendezItems(items);
   const mendezItems = ordered.filter(mentionsJuanManuelMendez);
   const otherItems = ordered.filter((it) => !mentionsJuanManuelMendez(it));
+  const top = topTerms || topMentionedTerms(items);
+  const broadcast = ordered.filter(
+    (it) => it.source === "tv" || it.source === "radio"
+  );
 
   const lines = [
     `Institución: INTRANT`,
@@ -170,9 +230,18 @@ export function buildRawMonitoringDump({
     `Período analizado: ${period}`,
     `Total de menciones en el material bruto: ${items.length}`,
     `Menciones prioritarias Juan Manuel Méndez: ${mendezItems.length}`,
+    top
+      ? `Término más mencionado del ciclo: **${top.term}** (${top.count} veces)` +
+        (top.ranked.length > 1
+          ? ` · Ranking: ${top.ranked.map((r) => `${r.term}(${r.count})`).join(", ")}`
+          : "")
+      : "Término más mencionado del ciclo: no determinado",
     "",
     "## INSTRUCCIÓN DE ORDEN",
     "Abre el reporte SIEMPRE con las piezas de la sección PRIORIDAD JUAN MANUEL MÉNDEZ (noticias/videos). Luego el resto.",
+    top
+      ? `Resalta en negrita el término dominante **${top.term}** en panorama y resumen.`
+      : "",
     "",
     "## Conteos por plataforma",
     `- Medios digitales: ${counts.gmail || 0}`,
@@ -180,22 +249,38 @@ export function buildRawMonitoringDump({
     `- YouTube: ${counts.youtube || 0}`,
     `- Instagram: ${counts.instagram || 0}`,
     `- Facebook: ${counts.facebook || 0}`,
-    `- Televisión: ${counts.tv || 0}`,
-    `- Radio: ${counts.radio || 0}`,
+    `- Televisión (clips .mp4): ${counts.tv || 0}`,
+    `- Radio / audio (.wav/.mp3): ${counts.radio || 0}`,
     "",
     "## PRIORIDAD — Juan Manuel Méndez (noticias / video / cobertura directa)",
-  ];
+  ].filter((x) => x !== "");
+
+  const clean = (v) => sanitizeForDeepseek(v);
 
   const pushMention = (it, i, prefix) => {
     lines.push("");
     lines.push(`### ${prefix} ${i}`);
     lines.push(`Plataforma: ${platformLabel(it.source)}`);
-    lines.push(`Medio / cuenta: ${it.medio || "—"}`);
-    lines.push(`Título: ${it.title || "—"}`);
-    lines.push(`Resumen: ${it.summary || it.title || "—"}`);
+    lines.push(`Medio / cuenta: ${clean(it.medio) || "—"}`);
+    if (it.term) lines.push(`Término detectado: ${clean(it.term)}`);
+    if (it.tono) lines.push(`Tono: ${clean(it.tono)}`);
+    if (it.mediaKind) {
+      lines.push(
+        `Tipo de archivo: ${
+          it.mediaKind === "mp4"
+            ? "Clip TV (.mp4)"
+            : it.mediaKind === "wav"
+              ? "Audio (.wav)"
+              : `Audio (.${it.mediaKind})`
+        }`
+      );
+    }
+    lines.push(`Título: ${clean(it.title) || "—"}`);
+    lines.push(`Resumen: ${clean(it.summary || it.title) || "—"}`);
     lines.push(`Relevancia operativa: ${it.relevance || "media"}`);
     lines.push(`Fecha pieza: ${it.at || "no indicada"}`);
     lines.push(`Enlace: ${it.url || "sin enlace"}`);
+    if (it.txtUrl) lines.push(`Transcripción TXT: ${it.txtUrl}`);
     lines.push(`Prioridad director: ${mentionsJuanManuelMendez(it) ? "SÍ — Juan Manuel Méndez" : "no"}`);
   };
 
@@ -207,8 +292,19 @@ export function buildRawMonitoringDump({
   }
 
   lines.push("");
+  lines.push("## Televisión / Radio (Analisishoy MD completo)");
+  if (broadcast.length) {
+    broadcast.forEach((it, i) => pushMention(it, i + 1, it.source === "radio" ? "Audio" : "TV"));
+  } else {
+    lines.push("");
+    lines.push("(Sin menciones Intrant en Analisishoy TV/radio para esta ventana.)");
+  }
+
+  lines.push("");
   lines.push("## Resto del monitoreo");
-  otherItems.forEach((it, i) => pushMention(it, i + 1, "Mención"));
+  otherItems
+    .filter((it) => it.source !== "tv" && it.source !== "radio")
+    .forEach((it, i) => pushMention(it, i + 1, "Mención"));
 
   if (!items.length) {
     lines.push("");
@@ -229,22 +325,29 @@ export async function generateExecutiveBrief({
   periodLabel,
   onStatus,
 } = {}) {
+  const topTerms = topMentionedTerms(items);
   const rawDump = buildRawMonitoringDump({
     displayDate,
     dateYmd,
     counts,
     items,
     periodLabel,
+    topTerms,
   });
 
   onStatus?.("Redactando brief ejecutivo (inteligencia reputacional)…");
 
+  const topHint = topTerms
+    ? `\nTérmino dominante del ciclo (resaltar en negrita): **${topTerms.term}** (${topTerms.count} menciones). Ranking: ${topTerms.ranked.map((r) => `${r.term}(${r.count})`).join(", ")}.`
+    : "";
+
   const userMsg = `Fecha del monitoreo: ${displayDate}
 Período analizado: ${periodLabel || `Monitoreo asociado al ${displayDate}`}
+${topHint}
 
 REGLA DE APERTURA OBLIGATORIA: empieza el informe con la cobertura de Juan Manuel Méndez (noticias, entrevistas, videos). Si la sección PRIORIDAD — Juan Manuel Méndez tiene piezas, úsalas primero en resumen, narrativas y menciones prioritarias.
 
-Analiza íntegramente el siguiente reporte bruto y conviértelo en el formato ejecutivo obligatorio:
+Analiza íntegramente el siguiente reporte bruto (incluye Televisión/Radio del MD Analisishoy completo) y conviértelo en el formato ejecutivo obligatorio:
 
 ---
 ${rawDump}
@@ -257,7 +360,7 @@ ${rawDump}
   });
 
   if (!content) throw new Error("DeepSeek no devolvió el brief ejecutivo");
-  return { markdown: content, rawDump };
+  return { markdown: content, rawDump, topTerms };
 }
 
 function escapeHtml(value = "") {
@@ -567,6 +670,10 @@ export function wrapExecutiveEmailHtml({
   pdfFilename,
   attachmentFilename,
   stats = null,
+  bySource = null,
+  topTerms = null,
+  broadcastHtml = "",
+  reputBannerCid = "",
 } = {}) {
   const fileLabel = attachmentFilename || pdfFilename || "";
   const total = stats?.total ?? "";
@@ -581,29 +688,74 @@ export function wrapExecutiveEmailHtml({
     stats && typeof stats.byGroup?.redes === "number"
       ? (stats.byGroup.redes || 0) + (stats.byGroup.video || 0)
       : "";
+  const tvCount = bySource?.tv?.length ?? stats?.byGroup?.broadcast ?? "";
+  const radioCount = bySource?.radio?.length ?? "";
+  const top =
+    topTerms ||
+    topMentionedTerms([
+      ...(bySource?.tv || []),
+      ...(bySource?.radio || []),
+    ]);
 
   const kpi = (value, label, accent) =>
     value === "" || value === undefined
       ? ""
       : `<div style="background:${accent};border-radius:10px;padding:10px 12px;min-width:86px;">
-          <div style="font-size:20px;font-weight:700;color:#fff;">${escapeHtml(String(value))}</div>
-          <div style="font-size:10px;color:rgba(255,255,255,0.75);margin-top:2px;text-transform:uppercase;letter-spacing:0.04em;">${escapeHtml(label)}</div>
+          <div style="font-size:22px;font-weight:700;color:#fff;">${escapeHtml(String(value))}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.75);margin-top:2px;text-transform:uppercase;letter-spacing:0.04em;">${escapeHtml(label)}</div>
         </div>`;
 
+  const topTermBanner = top
+    ? `<div style="margin:14px 0 0;padding:10px 14px;border-radius:10px;background:rgba(251,191,36,0.18);border:1px solid rgba(251,191,36,0.45);">
+        <div style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#FDE68A;font-weight:700;">Término más mencionado en este ciclo</div>
+        <div style="margin-top:4px;font-size:18px;font-weight:800;color:#FFF;">
+          <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:#F59E0B;color:#111827;">${escapeHtml(top.term)}</span>
+          <span style="margin-left:8px;font-size:13px;font-weight:600;color:#FDE68A;">${top.count} menciones</span>
+        </div>
+        ${
+          top.ranked.length > 1
+            ? `<div style="margin-top:8px;font-size:12px;color:#E2E8F0;">También: ${top.ranked
+                .slice(1)
+                .map((r) => `<strong style="color:#fff;">${escapeHtml(r.term)}</strong> (${r.count})`)
+                .join(" · ")}</div>`
+            : ""
+        }
+      </div>`
+    : "";
+
+  const annex =
+    broadcastHtml ||
+    (bySource
+      ? buildBroadcastAnnexHtml({
+          tv: bySource.tv || [],
+          radio: bySource.radio || [],
+          topTerms: top,
+        })
+      : "");
+
   return `<div style="font-family:Segoe UI,Arial,sans-serif;max-width:780px;margin:0 auto;color:#0f172a;background:#F1F5F9;padding:12px;">
-  <div style="background:linear-gradient(135deg,#0B1F3A 0%,#123056 55%,#1e3a5f 100%);border-radius:14px 14px 0 0;padding:22px 24px;color:#fff;">
-    <div style="font-size:11px;letter-spacing:0.12em;color:#93C5FD;font-weight:700;">INTRANT · INTELIGENCIA REPUTACIONAL</div>
-    <div style="font-size:22px;font-weight:700;margin-top:8px;line-height:1.25;">Reporte ejecutivo de monitoreo, reputación y conversación digital</div>
-    <div style="color:#CBD5E1;margin-top:8px;font-size:13px;">${escapeHtml(displayDate)} · Uso Departamento de Comunicaciones</div>
+  ${
+    reputBannerCid
+      ? `<img src="cid:${reputBannerCid}" alt="Estado reputacional Juan Manuel Méndez" width="780" style="width:100%;max-width:780px;height:auto;display:block;border-radius:14px 14px 0 0;">`
+      : ""
+  }
+  <div style="background:linear-gradient(135deg,#0B1F3A 0%,#123056 55%,#1e3a5f 100%);border-radius:${reputBannerCid ? "0" : "14px 14px 0 0"};padding:22px 24px;color:#fff;">
+    <div style="font-size:12px;letter-spacing:0.12em;color:#93C5FD;font-weight:700;">INTRANT · INTELIGENCIA REPUTACIONAL</div>
+    <div style="font-size:24px;font-weight:700;margin-top:8px;line-height:1.25;">Reporte ejecutivo de monitoreo, reputación y conversación digital</div>
+    <div style="color:#CBD5E1;margin-top:8px;font-size:14px;">${escapeHtml(displayDate)} · Uso Departamento de Comunicaciones</div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;">
       ${kpi(net, "Balance", "#0F766E")}
       ${kpi(total, "Menciones", "#B91C1C")}
       ${kpi(prensa, "Medios", "#1D4ED8")}
       ${kpi(redes, "Redes / video", "#7C3AED")}
+      ${kpi(tvCount, "TV .mp4", "#0369A1")}
+      ${kpi(radioCount, "Audio", "#0F766E")}
     </div>
+    ${topTermBanner}
   </div>
   <div style="background:#fff;border:1px solid #e2e8f0;border-top:0;border-radius:0 0 14px 14px;padding:8px 20px 22px;">
     ${bodyHtml}
+    ${annex}
     ${
       fileLabel
         ? `<p style="margin-top:24px;padding:12px 14px;border-radius:10px;background:#F1F5F9;color:#475569;font-size:12px;">📎 Adjunto Word ejecutivo: <strong style="color:#0B1F3A;">${escapeHtml(fileLabel)}</strong></p>`
@@ -611,4 +763,105 @@ export function wrapExecutiveEmailHtml({
     }
   </div>
 </div>`;
+}
+
+function tonoBadgeHtml(tono) {
+  const map = {
+    positiva: { bg: "#16a34a", text: "FAVORABLE" },
+    negativa: { bg: "#dc2626", text: "CRÍTICA" },
+    neutral: { bg: "#64748b", text: "NEUTRAL" },
+  };
+  const { bg, text } = map[tono] || map.neutral;
+  return `<span style="display:inline-block;background:${bg};color:#fff;font-size:10px;font-weight:700;letter-spacing:.03em;padding:3px 8px;border-radius:999px;">${text}</span>`;
+}
+
+function broadcastToneCounts(items = []) {
+  const c = { positiva: 0, negativa: 0, neutral: 0 };
+  for (const it of items) {
+    const t = it.tono || "neutral";
+    c[t] = (c[t] || 0) + 1;
+  }
+  return c;
+}
+
+/** Anexo determinístico TV (.mp4) / Radio-audio (.wav/.mp3) desde Analisishoy. */
+export function buildBroadcastAnnexHtml({ tv = [], radio = [], topTerms = null } = {}) {
+  const all = [...tv, ...radio];
+  const tones = broadcastToneCounts(all);
+  const top = topTerms || topMentionedTerms(all);
+
+  const card = (it, i) => {
+    const isAudio = it.source === "radio" || it.mediaType === "audio";
+    const accent = isAudio ? "#0f766e" : "#1d4ed8";
+    const kind =
+      it.mediaKind === "wav"
+        ? "Audio (.wav)"
+        : it.mediaKind === "mp3"
+          ? "Audio (.mp3)"
+          : isAudio
+            ? "Audio"
+            : "Clip TV (.mp4)";
+    const cta = isAudio
+      ? `Escuchar audio (${it.mediaKind || "wav"}) →`
+      : "Ver clip (.mp4) →";
+    const termChip = it.term
+      ? `<span style="display:inline-block;margin-left:6px;padding:3px 8px;border-radius:999px;background:${
+          top?.term === it.term ? "#F59E0B" : "#e2e8f0"
+        };color:${top?.term === it.term ? "#111827" : "#0f172a"};font-size:10px;font-weight:800;">${escapeHtml(it.term)}</span>`
+      : "";
+    const link = it.url
+      ? `<p style="margin:10px 0 0;"><a href="${escapeHtml(it.url)}" style="color:#0f766e;font-weight:700;text-decoration:none;">${cta}</a></p>`
+      : `<p style="margin:10px 0 0;color:#b45309;font-size:12px;">Sin URL en el MD</p>`;
+    return `<tr><td style="padding:0 0 12px;">
+      <table width="100%" cellspacing="0" cellpadding="0" style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;">
+        <tr><td style="padding:14px 16px;border-left:4px solid ${accent};">
+          <p style="margin:0 0 8px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">#${i + 1} · ${escapeHtml(kind)} · ${escapeHtml(it.at || "")}${termChip}</p>
+          <p style="margin:0 0 8px;">
+            <span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${accent};color:#ffffff !important;font-size:11px;font-weight:800;">${escapeHtml(it.medio || "Medio")}</span>
+            &nbsp;${tonoBadgeHtml(it.tono || "neutral")}
+          </p>
+          <p style="margin:0 0 6px;font-size:15px;font-weight:700;color:#0f172a;line-height:1.35;">${escapeHtml(it.title || "")}</p>
+          <p style="margin:0;font-size:13px;line-height:1.5;color:#334155;">${escapeHtml(it.summary || "")}</p>
+          ${link}
+        </td></tr>
+      </table>
+    </td></tr>`;
+  };
+
+  const header = `<div style="margin:28px 0 12px;padding:16px 18px;border-radius:12px;background:#f0fdfa;border:1px solid #99f6e4;">
+    <div style="font-size:12px;font-weight:800;color:#134e4a;letter-spacing:.06em;text-transform:uppercase;">Hallazgos TV / Radio · Analisishoy MD</div>
+    <p style="margin:8px 0 0;font-size:14px;color:#0f172a;line-height:1.5;">
+      ${all.length} menciones Intrant en este ciclo
+      · Favorables <strong>${tones.positiva}</strong>
+      · Críticas <strong>${tones.negativa}</strong>
+      · Neutrales <strong>${tones.neutral}</strong>
+      · TV <strong>${tv.length}</strong> · Audio <strong>${radio.length}</strong>
+    </p>
+    ${
+      top
+        ? `<p style="margin:10px 0 0;font-size:14px;color:#0f172a;">Palabra más mencionada:
+            <span style="display:inline-block;padding:4px 12px;border-radius:999px;background:#F59E0B;color:#111827;font-weight:800;">${escapeHtml(top.term)}</span>
+            <span style="color:#64748b;">(${top.count})</span>
+            ${
+              top.ranked.length > 1
+                ? `<span style="color:#64748b;"> · ${top.ranked
+                    .slice(1)
+                    .map((r) => `${escapeHtml(r.term)} (${r.count})`)
+                    .join(" · ")}</span>`
+                : ""
+            }
+          </p>`
+        : ""
+    }
+  </div>`;
+
+  if (!all.length) {
+    return `${header}<p style="color:#64748b;font-size:13px;">Sin menciones Intrant en Analisishoy (hoy/ayer).</p>`;
+  }
+
+  return `${header}
+  <h3 style="margin:16px 0 8px;font-size:15px;color:#1d4ed8;">Televisión · .mp4 (${tv.length})</h3>
+  <table width="100%" cellspacing="0" cellpadding="0">${tv.map((it, i) => card(it, i)).join("") || "<tr><td style=\"color:#64748b;padding:8px;\">Sin clips TV.</td></tr>"}</table>
+  <h3 style="margin:18px 0 8px;font-size:15px;color:#0f766e;">Audio · .wav / .mp3 (${radio.length})</h3>
+  <table width="100%" cellspacing="0" cellpadding="0">${radio.map((it, i) => card(it, i)).join("") || "<tr><td style=\"color:#64748b;padding:8px;\">Sin audios.</td></tr>"}</table>`;
 }

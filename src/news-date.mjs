@@ -78,3 +78,83 @@ export function isNewsFromToday(
   // Si alguna señal es hoy, vale; si todas son otro día, fuera.
   return candidates.some((ymd) => ymd === today);
 }
+
+const MS_HOUR = 60 * 60 * 1000;
+
+/**
+ * Fecha de publicación más fiable (publishedAt o URL) → Date, o null.
+ * Día sin hora → mediodía UTC de ese día (aprox. para edad).
+ */
+export function resolvePublishedDate({ url = "", publishedAt = "" } = {}) {
+  if (publishedAt) {
+    const d = new Date(publishedAt);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  const ymd = toYmd(publishedAt) || extractDateFromUrl(url);
+  if (!ymd) return null;
+  const [y, m, day] = ymd.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, day, 16, 0, 0));
+}
+
+/** Edad en horas desde la fecha de la noticia; null si no hay fecha. */
+export function newsAgeHours(meta = {}, now = new Date()) {
+  const published = resolvePublishedDate(meta);
+  if (!published) return null;
+  return (now.getTime() - published.getTime()) / MS_HOUR;
+}
+
+/**
+ * True solo si hay fecha de noticia y tiene ≤ maxAgeHours.
+ * Sin fecha fiable → false (no se asume fresca).
+ */
+export function isNewsWithinHours(
+  { url = "", publishedAt = "" } = {},
+  maxAgeHours = 24,
+  now = new Date()
+) {
+  const age = newsAgeHours({ url, publishedAt }, now);
+  if (age == null) return false;
+  if (age < -1) return false; // futuro absurdo
+  return age <= maxAgeHours;
+}
+
+/**
+ * Titulares del nombramiento Méndez / “Abinader designa…” que recirculan años después.
+ */
+export function looksLikeStaleIntrantAppointment(title = "") {
+  const t = String(title || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "");
+  if (!t) return false;
+  if (/abinader\s+designa/.test(t) && /mendez|intrant/.test(t)) return true;
+  if (/designa(?:do)?\s+(?:al\s+)?(?:general\s+)?juan\s+manuel\s+mendez/.test(t))
+    return true;
+  if (
+    /nombr(?:a|amiento|ado)/.test(t) &&
+    /juan\s+manuel\s+mendez/.test(t) &&
+    /intrant|director/.test(t)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * ¿Se puede incluir en alertas Intrant del día?
+ * Requiere fecha de la noticia (URL, publishedAt o cuerpo) ≤ maxAgeHours.
+ * Sin fecha → fuera. Titulares de nombramiento Méndez recirculado → fuera.
+ */
+export function isFreshIntrantAlert(
+  { url = "", publishedAt = "", title = "" } = {},
+  { maxAgeHours = 24, now = new Date() } = {}
+) {
+  if (looksLikeStaleIntrantAppointment(title)) {
+    const age = newsAgeHours({ url, publishedAt }, now);
+    // Solo pasa si hay fecha verificada ≤24h
+    return age != null && age >= -1 && age <= maxAgeHours;
+  }
+  const age = newsAgeHours({ url, publishedAt }, now);
+  if (age == null) return false;
+  return age >= -1 && age <= maxAgeHours;
+}

@@ -333,32 +333,41 @@ export async function sendBuscaEmail(email, { to, cc } = {}) {
 function medioBrand(hostOrName = "") {
   const key = fold(hostOrName);
   const brands = [
-    { match: /listin|listindiario/, name: "Listín Diario", bg: "#1d4ed8", fg: "#ffffff" },
-    { match: /diario.?libre|diariolibre/, name: "Diario Libre", bg: "#dc2626", fg: "#ffffff" },
-    { match: /el.?dia|eldia/, name: "El Día", bg: "#ea580c", fg: "#ffffff" },
-    { match: /nacional|elnacional/, name: "El Nacional", bg: "#111827", fg: "#fbbf24" },
-    { match: /\bhoy\b|hoy\.com/, name: "Hoy", bg: "#7c3aed", fg: "#ffffff" },
-    { match: /caribe|elcaribe/, name: "El Caribe", bg: "#0369a1", fg: "#ffffff" },
-    { match: /acento/, name: "Acento", bg: "#be123c", fg: "#ffffff" },
-    { match: /\bcdn\b/, name: "CDN", bg: "#e11d48", fg: "#ffffff" },
-    { match: /\bn digital\b|^n\.com|n\.com\.do/, name: "N Digital", bg: "#0ea5e9", fg: "#ffffff" },
-    { match: /z101/, name: "Z101", bg: "#16a34a", fg: "#ffffff" },
-    { match: /rcc/, name: "RCC", bg: "#0f766e", fg: "#ffffff" },
-    { match: /nuevo.?diario|elnuevodiario/, name: "El Nuevo Diario", bg: "#1e3a8a", fg: "#ffffff" },
-    { match: /noticentro/, name: "Noticentro", bg: "#b91c1c", fg: "#ffffff" },
-    { match: /arecoa/, name: "Arecoa", bg: "#4338ca", fg: "#ffffff" },
-    { match: /proceso/, name: "Proceso", bg: "#334155", fg: "#ffffff" },
-    { match: /remolacha/, name: "Remolacha", bg: "#65a30d", fg: "#ffffff" },
-    { match: /intrant/, name: "INTRANT", bg: "#0f766e", fg: "#ffffff" },
-    { match: /presidencia/, name: "Presidencia", bg: "#1e40af", fg: "#ffffff" },
+    { match: /listin|listindiario/, name: "Listín Diario", bg: "#1d4ed8" },
+    { match: /diario.?libre|diariolibre/, name: "Diario Libre", bg: "#dc2626" },
+    { match: /el.?dia|eldia/, name: "El Día", bg: "#ea580c" },
+    { match: /nacional|elnacional/, name: "El Nacional", bg: "#111827" },
+    { match: /\bhoy\b|hoy\.com/, name: "Hoy", bg: "#7c3aed" },
+    { match: /caribe|elcaribe/, name: "El Caribe", bg: "#0369a1" },
+    { match: /acento/, name: "Acento", bg: "#be123c" },
+    { match: /\bcdn\b/, name: "CDN", bg: "#e11d48" },
+    { match: /\bn digital\b|^n\.com|n\.com\.do/, name: "N Digital", bg: "#0ea5e9" },
+    { match: /z101/, name: "Z101", bg: "#16a34a" },
+    { match: /rcc/, name: "RCC", bg: "#0f766e" },
+    { match: /nuevo.?diario|elnuevodiario/, name: "El Nuevo Diario", bg: "#1e3a8a" },
+    { match: /noticentro/, name: "Noticentro", bg: "#b91c1c" },
+    { match: /arecoa/, name: "Arecoa", bg: "#4338ca" },
+    { match: /proceso/, name: "Proceso", bg: "#334155" },
+    { match: /remolacha/, name: "Remolacha", bg: "#65a30d" },
+    { match: /primicias/, name: "Primicias", bg: "#b45309" },
+    { match: /intrant/, name: "INTRANT", bg: "#0f766e" },
+    { match: /presidencia/, name: "Presidencia", bg: "#1e40af" },
   ];
   for (const b of brands) {
-    if (b.match.test(key)) return { name: b.name, bg: b.bg, fg: b.fg };
+    if (b.match.test(key)) return { name: b.name, bg: b.bg, fg: "#ffffff" };
   }
   const palette = ["#0f766e", "#1d4ed8", "#b45309", "#7e22ce", "#be123c", "#0369a1"];
   let hash = 0;
   for (const ch of key) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  return { name: hostOrName || "Medio", bg: palette[hash % palette.length], fg: "#ffffff" };
+  // Nombre corto: evita "primicias.net primicias.net"
+  const shortName =
+    String(hostOrName || "Medio")
+      .split(/\s+/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .filter((p, i, arr) => arr.findIndex((x) => fold(x) === fold(p)) === i)[0] ||
+    "Medio";
+  return { name: shortName, bg: palette[hash % palette.length], fg: "#ffffff" };
 }
 
 function scoreMeta(score = 0) {
@@ -369,6 +378,15 @@ function scoreMeta(score = 0) {
   return { label: "Baja", bg: "#64748b", bar: "#94a3b8", pct: 32 };
 }
 
+/** Pastilla con fondo de color: texto siempre blanco (Gmail autolinkea dominios en azul). */
+function colorPill(label, bg, { upper = false, size = 11 } = {}) {
+  const raw = String(label || "").trim();
+  // ZWSP tras cada punto evita que Gmail convierta "medio.com" en <a> azul
+  const safe = escapeHtml(raw).replace(/\./g, ".\u200B");
+  const transform = upper ? "text-transform:uppercase;letter-spacing:.04em;" : "letter-spacing:.03em;";
+  return `<span style="display:inline-block;padding:4px 10px;border-radius:999px;background:${bg};color:#ffffff !important;font-size:${size}px;font-weight:800;${transform}mso-style-textfill-fill-color:#ffffff;"><font color="#ffffff" style="color:#ffffff !important;">${safe}</font></span>`;
+}
+
 function enginePills(engines = []) {
   const map = {
     tavily: { label: "Tavily", bg: "#4f46e5" },
@@ -377,7 +395,7 @@ function enginePills(engines = []) {
   return engines
     .map((e) => {
       const m = map[String(e).toLowerCase()] || { label: e, bg: "#475569" };
-      return `<span style="display:inline-block;margin:0 4px 0 0;padding:3px 8px;border-radius:999px;background:${m.bg};color:#fff;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;">${escapeHtml(m.label)}</span>`;
+      return colorPill(m.label, m.bg, { upper: true, size: 10 });
     })
     .join("");
 }
@@ -397,18 +415,18 @@ function hitCardHtml(hit, index) {
     <td style="padding:0 0 14px;">
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#ffffff;border:1px solid ${border};border-radius:14px;overflow:hidden;">
         <tr>
-          <td style="width:52px;background:${brand.bg};color:${brand.fg};text-align:center;vertical-align:middle;font-size:18px;font-weight:800;padding:16px 8px;">
-            #${rank}
+          <td style="width:52px;background:${brand.bg};color:#ffffff !important;text-align:center;vertical-align:middle;font-size:18px;font-weight:800;padding:16px 8px;">
+            <font color="#ffffff">#${rank}</font>
           </td>
           <td style="padding:14px 16px 12px;vertical-align:top;">
             <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
               <tr>
                 <td style="vertical-align:middle;">
-                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;background:${brand.bg};color:${brand.fg};font-size:11px;font-weight:800;letter-spacing:.03em;">${escapeHtml(brand.name || hit.medio)}</span>
+                  ${colorPill(brand.name || hit.medio || hit.host, brand.bg)}
                   ${both ? `<span style="display:inline-block;margin-left:6px;padding:4px 8px;border-radius:999px;background:#ecfdf5;color:#047857;font-size:10px;font-weight:700;">✓ Ambos motores</span>` : ""}
                 </td>
                 <td align="right" style="vertical-align:middle;white-space:nowrap;">
-                  <span style="display:inline-block;padding:5px 10px;border-radius:10px;background:${score.bg};color:#fff;font-size:12px;font-weight:800;">${Number(hit._score ?? 0).toFixed(1)}</span>
+                  ${colorPill(Number(hit._score ?? 0).toFixed(1), score.bg, { size: 12 })}
                   <span style="display:inline-block;margin-left:4px;font-size:11px;color:#64748b;font-weight:600;">${score.label}</span>
                 </td>
               </tr>

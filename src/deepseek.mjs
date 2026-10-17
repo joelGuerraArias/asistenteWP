@@ -7,13 +7,43 @@ import {
 } from "./article-json.mjs";
 import {
   extractOriginalTitle,
+  looksLikeRawNewsLead,
+  NEVER_NAME_MILTON_JEREZ_RULE,
   parseSourceFromUrl,
+  scrubMiltonJerez,
+  stripMediaDateline,
 } from "./news-format.mjs";
 
 const SYSTEM_PROMPT = `Eres JARVIS, asistente de FV Digital (fvdigital.do). Español, breve, útil.
 El usuario usa /ia solo para charlar. La publicación a WordPress es automática: enlaces, capturas y fotos.
 No hagas análisis largos ni listas de opciones. No preguntes categorías, borrador ni confirmaciones.
 Si preguntan cómo publicar: "Envía el enlace o una captura con /noticia."`;
+
+/**
+ * DeepSeek's JSON parser 400s on lone UTF-16 surrogates ("unexpected end of hex escape").
+ * Scraped titles/summaries often slice mid-emoji; JSON.stringify emits unpaired \udXXX.
+ */
+export function sanitizeForDeepseek(value = "") {
+  const s = String(value ?? "");
+  if (!s) return s;
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x20 && c !== 9 && c !== 10 && c !== 13) continue;
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const n = s.charCodeAt(i + 1);
+      if (n >= 0xdc00 && n <= 0xdfff) {
+        out += s[i] + s[i + 1];
+        i++;
+        continue;
+      }
+      continue;
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) continue;
+    out += s[i];
+  }
+  return out;
+}
 
 export async function deepseekChat(
   messages,
@@ -26,9 +56,17 @@ export async function deepseekChat(
   const model = config.deepseek.model || "deepseek-v4-pro";
   const useThinking = thinking ?? config.deepseek.thinking;
 
+  const safeMessages = (messages || []).map((m) => ({
+    ...m,
+    content: sanitizeForDeepseek(m?.content ?? ""),
+  }));
+
   const body = {
     model,
-    messages: [{ role: "system", content: system || SYSTEM_PROMPT }, ...messages],
+    messages: [
+      { role: "system", content: sanitizeForDeepseek(system || SYSTEM_PROMPT) },
+      ...safeMessages,
+    ],
     temperature,
     thinking: { type: useThinking ? "enabled" : "disabled" },
   };
@@ -55,9 +93,22 @@ export async function deepseekChat(
     { label: "DeepSeek" }
   );
 
-  const data = await res.json().catch(() => ({}));
+  const rawText = await res.text().catch(() => "");
+  let data = {};
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    data = { raw: rawText.slice(0, 500) };
+  }
   if (!res.ok) {
-    throw new Error(data?.error?.message || `DeepSeek ${res.status}`);
+    const detail =
+      data?.error?.message ||
+      data?.message ||
+      (typeof data?.error === "string" ? data.error : "") ||
+      (data?.raw ? String(data.raw) : "") ||
+      rawText.slice(0, 500) ||
+      `DeepSeek ${res.status}`;
+    throw new Error(`DeepSeek ${res.status}: ${detail}`);
   }
 
   const msg = data.choices?.[0]?.message;
@@ -105,7 +156,7 @@ Instrucciones extra: ${userHint || "ninguna"}
 
 Texto OCR:
 ---
-${ocrText}
+${scrubMiltonJerez(ocrText)}
 ---`;
 
   const { content } = await deepseekChat(
@@ -124,8 +175,8 @@ ${ocrText}
 
   return {
     title,
-    excerpt: (draft.excerpt || fields.excerpt || "").replace(/^["']|["']$/g, ""),
-    body_html: fields.content_html,
+    excerpt: scrubMiltonJerez((draft.excerpt || fields.excerpt || "").replace(/^["']|["']$/g, "")),
+    body_html: scrubMiltonJerez(fields.content_html),
     sourceName,
     sourceUrl,
   };
@@ -161,7 +212,7 @@ Indicaciones: ${userHint || "ninguna"}
 
 Documento:
 ---
-${String(docText || "").slice(0, 12000)}
+${scrubMiltonJerez(String(docText || "").slice(0, 12000))}
 ---`;
 
   const { content } = await deepseekChat(
@@ -186,10 +237,10 @@ ${String(docText || "").slice(0, 12000)}
   const fields = coerceArticleFields(draft.content_html || content);
 
   return {
-    title,
-    excerpt: String(draft.excerpt || fields.excerpt || "").replace(/^["']|["']$/g, ""),
-    body_html: fields.content_html,
-    summary: String(draft.summary || "").trim(),
+    title: scrubMiltonJerez(title),
+    excerpt: scrubMiltonJerez(String(draft.excerpt || fields.excerpt || "").replace(/^["']|["']$/g, "")),
+    body_html: scrubMiltonJerez(fields.content_html),
+    summary: scrubMiltonJerez(String(draft.summary || "").trim()),
   };
 }
 
@@ -199,7 +250,8 @@ const EDITORIAL_HTML_RULES = `FORMATO EDITORIAL FV DIGITAL:
 - <strong> obligatorio en: nombres propios, países, ciudades, instituciones, cargos, cifras, porcentajes y fechas clave
 - Comillas normales (" "), guiones largos (—), texto limpio sin entidades HTML (&amp; #8211; etc.)
 - NO metadatos de agencia (EFE, AP, ARCHIVO, LD, Listín Diario, fechas sueltas de publicación)
-- NO menciones al medio de origen ni fuentes externas en el cuerpo`;
+- NO menciones al medio de origen ni fuentes externas en el cuerpo
+${NEVER_NAME_MILTON_JEREZ_RULE}`;
 
 /**
  * Corrige SOLO ortografía, tildes y puntuación de un titular o caption.
@@ -334,7 +386,7 @@ Traduce al español si el texto base está en otro idioma. Reescribe con estilo 
 
 Texto base:
 ---
-${text.slice(0, 6500)}
+${scrubMiltonJerez(text).slice(0, 6500)}
 ---
 
 JSON: { "content_html": "cuerpo en HTML con <p> y <strong>" }`;
@@ -352,12 +404,18 @@ JSON: { "content_html": "cuerpo en HTML con <p> y <strong>" }`;
   }
 
   return {
-    content_html: coerceArticleHtml(draft.content_html || content),
+    content_html: scrubMiltonJerez(coerceArticleHtml(draft.content_html || content)),
     title: spanishTitle,
   };
 }
 
-export async function writeOriginalNews({ topic, title, researchText = "" }) {
+export async function writeOriginalNews({
+  topic,
+  title,
+  researchText = "",
+  rewriteNotes = "",
+}) {
+  const notes = String(rewriteNotes || "").trim();
   const prompt = `Redacta una noticia original para WordPress (FV Digital, República Dominicana) en JSON.
 Tema: ${topic}
 Titular fijo (no lo cambies): "${title}"
@@ -372,10 +430,10 @@ REGLAS:
 - NO copies párrafos literales de las referencias; reescribe con estilo propio
 - El artículo debe tratar SOLO el tema "${topic}"; ignora información no relacionada
 - JSON válido: escapa comillas internas con \\"; NO uses \\' (escribe minutos como 79 min)
-
+${notes ? `\nINDICACIONES DEL EDITOR (oblígalas en el nuevo borrador):\n${notes.slice(0, 1200)}\n` : ""}
 ${EDITORIAL_HTML_RULES}
 
-${researchText ? `MATERIAL DE INVESTIGACIÓN (Tavily + web — usa nombres, cifras, fechas y lugares):\n---\n${researchText.slice(0, 6000)}\n---` : "No hay material de investigación; redacta con cautela."}
+${researchText ? `MATERIAL DE INVESTIGACIÓN (Tavily + web — usa nombres, cifras, fechas, lugares y fuentes; no nombres a Milton Jerez):\n---\n${scrubMiltonJerez(researchText).slice(0, 6000)}\n---` : "No hay material de investigación; redacta con cautela."}
 
 JSON:
 {
@@ -403,8 +461,10 @@ JSON:
 
   return {
     title,
-    excerpt: (draft.excerpt || fields.excerpt || "").replace(/^["']|["']$/g, ""),
-    body_html: fields.content_html,
+    excerpt: scrubMiltonJerez(
+      (draft.excerpt || fields.excerpt || "").replace(/^["']|["']$/g, "")
+    ),
+    body_html: scrubMiltonJerez(fields.content_html),
   };
 }
 
@@ -412,7 +472,7 @@ export async function suggestNewsTitles(topic, researchText = "") {
   const prompt = `Propón 3 titulares periodísticos en español para una noticia sobre:
 "${topic}"
 
-${researchText ? `Basado en esta investigación (Tavily + fuentes — datos concretos obligatorios):\n${researchText.slice(0, 5000)}` : ""}
+${researchText ? `Basado en esta investigación (Tavily + fuentes — datos concretos obligatorios):\n${scrubMiltonJerez(researchText).slice(0, 5000)}` : ""}
 
 Estilo FV Digital: claros, directos, sin clickbait exagerado.
 JSON: { "titles": ["titular 1", "titular 2", "titular 3"] }`;
@@ -481,8 +541,8 @@ ${bodyText}
 
   return {
     title,
-    excerpt: draft.excerpt || fields.excerpt || "",
-    body_html: fields.content_html,
+    excerpt: scrubMiltonJerez(draft.excerpt || fields.excerpt || ""),
+    body_html: scrubMiltonJerez(fields.content_html),
     sourceName: source.name,
     sourceUrl: source.url,
   };
@@ -538,51 +598,72 @@ ${bodyText ? `Extracto: ${bodyText.slice(0, 400)}` : ""}`;
 
 export async function generateNewsHeadline(bodyText, { platform = "", fallbackTitle = "" } = {}) {
   const clean = (txt) =>
-    String(txt || "")
-      .replace(/https?:\/\/\S+/g, "")
-      .replace(/#[\p{L}\d_.]+/gu, "")
-      .replace(/@[\w.]+/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
+    stripMediaDateline(
+      String(txt || "")
+        .replace(/https?:\/\/\S+/g, "")
+        .replace(/#[\p{L}\d_.]+/gu, "")
+        .replace(/@[\w.]+/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    );
 
   const body = clean(bodyText);
   const fallback = () => {
     const base = clean(fallbackTitle) || body;
     const firstSentence = base.split(/(?<=[.!?])\s/)[0] || base;
-    return firstSentence.slice(0, 90).replace(/[\s,;:.]+$/, "");
+    return trimHeadlineToComplete(firstSentence, 12) || firstSentence.slice(0, 90);
   };
 
   if (!body || body.length < 15) return fallback();
 
   try {
-    const prompt = `Eres editor de noticias de FV Digital (República Dominicana). A partir del texto de una ${platform ? `publicación de ${platform}` : "publicación en redes sociales"}, redacta UN titular periodístico interesante.
-Reglas estrictas:
-- Español, entre 6 y 14 palabras.
-- Debe reflejar el HECHO principal del texto, no copiar la frase literal del post.
-- Tono informativo y atractivo, sin clickbait exagerado ni signos de admiración.
-- Sin hashtags, sin @menciones, sin comillas, sin emojis.
+    const prompt = `Eres editor de FV Digital (fvdigital.do). Redacta UN titular periodístico propio a partir de ${platform ? `una publicación de ${platform}` : "esta noticia"}.
+Reglas estrictas (SIEMPRE):
+- Español, entre 6 y 12 palabras (máximo 12).
+- Idea COMPLETA: sujeto + qué pasó. NUNCA dejes la frase en el aire ni termines en de/del/por/no/en/con/para/y…
+- Titular propio: PROHIBIDO copiar lead del medio (AGENDA56, Listín, “SANTO DOMINGO ESTE.-”, etc.).
+- Sin nombre del medio de origen, sin hashtags, sin @menciones, sin comillas, sin emojis.
 - Conserva nombres propios relevantes.
+- ${NEVER_NAME_MILTON_JEREZ_RULE}
 
-Texto de la publicación:
+Texto:
 ---
 ${body.slice(0, 1500)}
 ---
+${fallbackTitle ? `Referencia (no copiar literal):\n${clean(fallbackTitle).slice(0, 200)}` : ""}
 
-Devuelve solo el titular.`;
+Devuelve SOLO el titular (≤12 palabras).`;
 
     const { content } = await deepseekChat(
       [{ role: "user", content: prompt }],
-      { temperature: 0.5 }
+      { temperature: 0.45 }
     );
 
-    const headline = clean(content)
+    let headline = clean(content)
       .replace(/^["'`]|["'`]$/g, "")
       .replace(/[.]+$/, "")
       .trim();
+    if (looksLikeRawNewsLead(headline)) headline = stripMediaDateline(headline);
 
-    const words = headline.split(" ").length;
-    if (headline && words >= 4 && headline.length <= 120) {
+    const words = headline.split(/\s+/).filter(Boolean).length;
+    if (
+      headline &&
+      words >= 4 &&
+      words <= 12 &&
+      !headlineLooksIncomplete(headline) &&
+      !looksLikeRawNewsLead(headline)
+    ) {
       return headline;
+    }
+    if (headline && words > 12) {
+      const trimmed = trimHeadlineToComplete(headline, 12);
+      if (
+        trimmed &&
+        !headlineLooksIncomplete(trimmed) &&
+        !looksLikeRawNewsLead(trimmed)
+      ) {
+        return trimmed;
+      }
     }
   } catch {
     // usa fallback
@@ -592,80 +673,198 @@ Devuelve solo el titular.`;
 }
 
 /**
- * Titular SOLO para tarjeta de redes (WP no usa esto).
- * - lang "es" (default): ≤12 palabras en español (IA si hace falta)
- * - lang "en": siempre inglés, máx. 12 palabras (F1RD)
+ * Contadores / chequeo de lower-third (tarjeta y barra roja).
+ * Si pasa de 12 palabras o queda “en el aire”, hay que reescribir.
+ */
+const HANGING_LAST_WORD =
+  /^(de|del|la|el|los|las|lo|le|les|en|con|para|por|y|o|u|a|al|un|una|unos|unas|no|ni|que|se|su|sus|mi|mis|tu|tus|como|más|menos|sin|sobre|entre|hasta|desde|hacia|bajo|ante|tras|durante|mediante|según|versus|vs|muy|tan|ya|aún|aun|si|sí|porque|aunque|mientras|cuando|donde|cual|cuál|quien|quién|esto|esta|este|esos|esas|ese|esa|the|a|an|of|in|on|for|and|or|to|with|by|at|from|into|over|about)$/i;
+
+export function countHeadlineWords(text = "") {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+/** True si el titular corta la idea (preposición, “por no”, puntos suspensivos…). */
+export function headlineLooksIncomplete(text = "") {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return true;
+  if (/\.\.\.|…\s*$/.test(raw)) return true;
+  const stripped = raw.replace(/[¿?¡!.,;:…]+$/g, "").trim();
+  const parts = stripped.split(/\s+/).filter(Boolean);
+  if (!parts.length) return true;
+  const last = parts[parts.length - 1];
+  if (HANGING_LAST_WORD.test(last)) return true;
+  // “por no”, “falta de”, “antes de” al final (última palabra ya cubierta; refuerzo 2-gram)
+  if (parts.length >= 2) {
+    const tail = `${parts[parts.length - 2]} ${last}`.toLowerCase();
+    if (
+      /^(por no|sin que|antes de|después de|frente a|junto a|cerca de|lejos de|a favor|en contra|debido a|gracias a|acerca de)$/i.test(
+        tail
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function needsLowerThirdRewrite(text = "", maxWords = 12) {
+  const n = countHeadlineWords(text);
+  if (n < 3) return true;
+  if (n > maxWords) return true;
+  return headlineLooksIncomplete(text);
+}
+
+/** Acorta sin dejar la última palabra colgando (nunca corta a lo bruto a N palabras). */
+export function trimHeadlineToComplete(text = "", maxWords = 12) {
+  const words = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return "";
+  let cut = words.slice(0, Math.min(maxWords, words.length));
+  while (cut.length > 3 && headlineLooksIncomplete(cut.join(" "))) {
+    cut.pop();
+  }
+  return cut.join(" ");
+}
+
+/**
+ * Titular SOLO para tarjeta / lower-third (WP no usa esto).
+ * SIEMPRE se analiza con las reglas ≤12 palabras + idea completa.
+ * - lang "en": siempre inglés (F1RD)
  */
 export async function composeCardHeadline(title, bodyText = "", { lang = "es" } = {}) {
   const clean = (txt) =>
-    String(txt || "")
-      .replace(/https?:\/\/\S+/g, "")
-      .replace(/#[\p{L}\d_.]+/gu, "")
-      .replace(/\s+/g, " ")
-      .trim();
+    stripMediaDateline(
+      String(txt || "")
+        .replace(/https?:\/\/\S+/g, "")
+        .replace(/#[\p{L}\d_.]+/gu, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    );
 
   const source = clean(title);
   const isEn = String(lang).toLowerCase().startsWith("en");
-  if (!source) return isEn ? "News" : clean(bodyText).slice(0, 120) || "Noticia";
+  if (!source) return isEn ? "News" : clean(bodyText).slice(0, 80) || "Noticia";
 
   const words = source.split(/\s+/).filter(Boolean);
-  // Español corto: se deja. Inglés: siempre pasa por IA (puede venir en ES del feed).
-  if (!isEn && words.length <= 12) return source;
 
-  const fallback = () => words.slice(0, 12).join(" ");
+  const accept = (candidate) => {
+    const h = clean(candidate)
+      .replace(/^["'`]|["'`]$/g, "")
+      .replace(/[.]+$/, "")
+      .trim();
+    if (!h || looksLikeRawNewsLead(h)) return "";
+    if (needsLowerThirdRewrite(h, 12)) return "";
+    const n = countHeadlineWords(h);
+    if (n < 3 || n > 12) return "";
+    return h;
+  };
 
+  // Siempre IA: no devolver el original “porque ya es corto”
   try {
     const prompt = isEn
-      ? `Rewrite this headline for a social MEDIA CARD (max 2 lines).
-Strict rules:
-- English only, MAXIMUM 12 words (exact count).
-- One concrete complete idea (who/what happened).
-- NO ellipsis, NO quotes, NO hashtags.
-- Do not end on a preposition or conjunction (of, the, a, an, in, on, for, and, or, to).
-- Keep key proper names (drivers, teams, races).
+      ? `Rewrite this for a social MEDIA CARD / lower-third.
+Strict rules (ALWAYS):
+- English only, MAXIMUM 12 words, COMPLETE idea.
+- Do NOT copy wire/dateline or outlet names.
+- NEVER end mid-thought (of, the, a, an, in, on, for, and, or, to…).
+- NO ellipsis, quotes, hashtags. Keep key proper names.
 
 Original (${words.length} words): "${source}"
 ${bodyText ? `Context: ${clean(bodyText).slice(0, 350)}` : ""}
 
-Return ONLY the rewritten English headline (≤12 words).`
-      : `Reescribe este titular para una TARJETA de redes (2 líneas máx).
-Reglas estrictas:
-- Español, MÁXIMO 12 palabras (cuenta exacta).
-- Una idea concreta y completa (sujeto + qué pasó).
-- SIN puntos suspensivos, SIN comillas, SIN hashtags.
-- No termines en preposición ni conjunción (de, del, la, el, en, con, para, por, y, o, a).
-- Conserva nombres propios clave.
+Return ONLY the headline (≤12 words, complete).`
+      : `Reescribe este titular para LOWER-THIRD / tarjeta FV Digital.
+Reglas (SIEMPRE — las de 12 palabras):
+- Español, MÁXIMO 12 palabras, idea COMPLETA (sujeto + qué pasó).
+- PROHIBIDO nombre de medio (AGENDA56, Listín…) y datelines (“SANTO DOMINGO ESTE.-”).
+- PROHIBIDO terminar en: de, del, la, el, en, con, para, por, y, o, a, un, una, no…
+- SIN puntos suspensivos, comillas ni hashtags. Conserva nombres propios clave.
 
-Titular original (${words.length} palabras): "${source}"
+Original (${words.length} palabras): "${source}"
 ${bodyText ? `Contexto: ${clean(bodyText).slice(0, 350)}` : ""}
 
-Devuelve SOLO el titular reescrito (≤12 palabras).`;
+Devuelve SOLO el titular (≤12 palabras, idea cerrada).`;
 
     const { content } = await deepseekChat(
       [{ role: "user", content: prompt }],
-      { temperature: 0.35 }
+      { temperature: 0.3 }
     );
 
-    let headline = clean(content)
-      .replace(/^["'`]|["'`]$/g, "")
-      .replace(/[.]+$/, "")
-      .trim();
-    const hw = headline.split(/\s+/).filter(Boolean);
-    if (headline && hw.length >= 3 && hw.length <= 12 && !/\.\.\.|…$/.test(headline)) {
-      return headline;
-    }
-    if (hw.length > 12) return hw.slice(0, 12).join(" ");
+    const ok = accept(content);
+    if (ok) return ok;
+
+    const { content: retry } = await deepseekChat(
+      [
+        {
+          role: "user",
+          content: isEn
+            ? `COMPLETE ≤12-word headline. No outlet names.\n\n"${clean(content) || source}"\n\nReturn ONLY the headline.`
+            : `Titular COMPLETO ≤12 palabras, sin medio ni dateline.\n\n"${clean(content) || source}"\n\nDevuelve SOLO el titular.`,
+        },
+      ],
+      { temperature: 0.2 }
+    );
+    const ok2 = accept(retry);
+    if (ok2) return ok2;
   } catch {
-    // fallback
+    // fallback abajo
   }
 
-  return fallback();
+  const trimmed = trimHeadlineToComplete(source, 12);
+  if (
+    trimmed &&
+    !headlineLooksIncomplete(trimmed) &&
+    !looksLikeRawNewsLead(trimmed)
+  ) {
+    return trimmed;
+  }
+  return trimmed || source;
+}
+
+/**
+ * Caption en español: si el texto viene en otro idioma lo traduce.
+ * Las líneas finales de solo hashtags se conservan sin traducir.
+ */
+export async function ensureSpanishCaption(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return raw;
+  const lines = raw.split(/\r?\n/);
+  const tail = [];
+  while (lines.length && /^(\s*#[\p{L}\p{N}_.]+\s*)+$/u.test(lines[lines.length - 1])) {
+    tail.unshift(lines.pop().trim());
+  }
+  const body = lines.join("\n").trim();
+  if (!body) return raw;
+
+  const { looksSpanishText, translateTextWithMistral } = await import("./audio.mjs");
+  const words = body.split(/\s+/).filter(Boolean).length;
+  if (words >= 6 && looksSpanishText(body)) return raw;
+
+  let translated = body;
+  try {
+    translated =
+      String(
+        (await translateTextWithMistral(body, {
+          context: "caption de video para redes sociales (conserva los saltos de párrafo)",
+        })) || ""
+      ).trim() || body;
+  } catch {
+    return raw;
+  }
+  return [translated, tail.join(" ")].filter(Boolean).join("\n\n").trim();
 }
 
 export async function generateSocialCaption(
   title,
   bodyText = "",
-  { hashtag = "#fvdigital", lang = "es" } = {}
+  { hashtag = "#fvdigital", lang = "es", stickToSource = false } = {}
 ) {
   // Limpia URLs/hashtags/menciones pero CONSERVA los saltos de párrafo.
   const cleanKeepBreaks = (txt) =>
@@ -685,14 +884,60 @@ export async function generateSocialCaption(
       .trim();
 
   const isEn = String(lang).toLowerCase().startsWith("en");
+  const source = cleanKeepBreaks(bodyText);
+  const sourceInline = cleanInline(bodyText);
 
-  const fallback = () => {
-    const base = cleanInline(bodyText).slice(0, 400) || cleanInline(title);
-    return `${base}\n\n${hashtag}`.trim();
+  const ensureSpanish = (text) => (isEn ? String(text || "").trim() : ensureSpanishCaption(text));
+
+  const fallback = async () => {
+    const base = sourceInline.slice(0, 700) || cleanInline(title);
+    return `${await ensureSpanish(base)}\n\n${hashtag}`.trim();
   };
 
+  // Caption de video: si no hay texto de origen, no inventar un relato.
+  if (stickToSource && sourceInline.length < 12) {
+    return fallback();
+  }
+
   try {
-    const prompt = isEn
+    const sourceBlock = (stickToSource ? source : sourceInline).slice(0, 3000);
+    const prompt = stickToSource
+      ? isEn
+        ? `Rewrite this video's OWN caption for Instagram/Facebook.
+HARD RULES:
+- Use ONLY facts, names, numbers and places that appear in the original caption (or title if the caption is empty).
+- Do NOT invent, guess, or add context, motives, quotes, dates, scores, or people who are not in the source.
+- Do NOT pad the text. If the original is short, keep it short.
+- You may fix spelling, punctuation and line breaks. At most 2 short paragraphs.
+- Do NOT include links, URLs, or hashtags.
+- At most one emoji, and only if the original used one.
+
+Title: "${title}"
+Original caption:
+---
+${sourceBlock}
+---
+
+Return only the rewritten caption.`
+        : `Reescribe EN ESPAÑOL el caption de este video para Instagram/Facebook.
+REGLAS DURAS:
+- El resultado va SIEMPRE en español. Si el caption original está en inglés, portugués, italiano, francés u otro idioma, TRADÚCELO al español (nombres propios se mantienen).
+- Usa SOLO los datos del caption original (nombres, cifras, lugares, hechos). El titular solo si el caption no trae ese dato.
+- NO inventes, NO adivines y NO agregues contexto, causas, citas, fechas, resultados ni personas que no estén en el original.
+- NO rellenes. Si el original es corto, el resultado también.
+- Puedes corregir ortografía, tildes y párrafos. Máximo 2 párrafos cortos.
+- ${NEVER_NAME_MILTON_JEREZ_RULE}
+- NO incluyas enlaces, URLs ni hashtags.
+- Máximo un emoji, y solo si el original ya tenía.
+
+Titular: "${title}"
+Caption original del video:
+---
+${sourceBlock}
+---
+
+Devuelve solo el caption.`
+      : isEn
       ? `Write the social caption (Instagram/Facebook) for this Formula 1 / motorsport post.
 Rules:
 - English only, journalistic but engaging tone.
@@ -702,14 +947,14 @@ Rules:
 - Include specific data present in the text: numbers, dates, results.
 - Summarize what happened, who is involved (by name), where, and why it matters.
 - Do NOT copy the headline as the first line; start with a concrete hook.
-- Do NOT invent facts, names, or places not in the text.
+- Do NOT invent facts, names, or places not in the text. If a detail is missing, omit it.
 - Do NOT include links, URLs, or hashtags (hashtag is added separately).
 - At most one emoji if it helps.
 
 Headline: "${title}"
 Article / source text:
 ---
-${cleanInline(bodyText).slice(0, 3000)}
+${sourceBlock}
 ---
 
 Return only the caption.`
@@ -722,21 +967,22 @@ Reglas:
 - Incluye datos específicos presentes en el texto: cifras, fechas, montos o resultados.
 - Resume lo esencial: qué pasó, quiénes están involucrados (con nombre), dónde y por qué importa.
 - NO copies el titular textual como primera línea; empieza con una frase de gancho concreta.
-- NO inventes datos, nombres ni lugares que no estén en el texto.
+- NO inventes datos, nombres ni lugares que no estén en el texto. Si falta un dato, omítelo.
+- ${NEVER_NAME_MILTON_JEREZ_RULE}
 - NO incluyas enlaces, URLs ni hashtags (yo agrego el hashtag aparte).
 - Sin emojis excesivos (máximo uno si aporta).
 
 Titular: "${title}"
 Contenido de la noticia:
 ---
-${cleanInline(bodyText).slice(0, 3000)}
+${sourceBlock}
 ---
 
 Devuelve solo el caption.`;
 
     const { content } = await deepseekChat(
       [{ role: "user", content: prompt }],
-      { temperature: 0.7 }
+      { temperature: stickToSource ? 0.2 : 0.7 }
     );
 
     let caption = cleanKeepBreaks(content).replace(/^["'`]|["'`]$/g, "").trim();
@@ -744,8 +990,9 @@ Devuelve solo el caption.`;
       caption = caption.slice(0, 1000).replace(/\s+\S*$/, "").trim();
     }
 
-    if (caption && caption.length >= 40) {
-      return `${caption}\n\n${hashtag}`.trim();
+    const minLen = stickToSource ? 8 : 40;
+    if (caption && caption.length >= minLen) {
+      return `${await ensureSpanish(caption)}\n\n${hashtag}`.trim();
     }
   } catch {
     // usa fallback

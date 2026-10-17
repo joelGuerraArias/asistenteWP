@@ -1,6 +1,6 @@
 # AsistenteWP — JARVIS para FV Digital
 
-**Versión actual: `2.5.0`** — historial en [CHANGELOG.md](CHANGELOG.md).
+**Versión actual: `2.8.0`** — historial en [CHANGELOG.md](CHANGELOG.md).
 
 Bot de Telegram + asistente WordPress para **fvdigital.do**. Publica noticias desde el móvil (texto, voz, foto, enlace), redacta artículos con IA y se conecta a Cursor vía [mcp-wordpress](https://github.com/docdyhr/mcp-wordpress).
 
@@ -85,7 +85,7 @@ Elimina la tarea programada y el acceso directo de Startup. **No borra** el proy
 
 ### Feed → redes (cron horario)
 
-Cada hora de **09:15 a 21:15** publica hasta 2 noticias nuevas por marca (gráfico + caption → webhook), sin repetir.
+Cada hora de **09:15 a 21:15** publica hasta **4** noticias nuevas de FV Digital (`FEED_REPOST_COUNT`) y hasta **2** de F1RD (`FEED_REPOST_F1_COUNT`): gráfico + caption → webhook, sin repetir.
 
 ```powershell
 npm run feed:repost              # FV + F1RD ahora
@@ -215,7 +215,7 @@ Busca tu bot (ej. `@AsisWPBot`) y envía mensajes.
 | **Enlace YT / IG / FB / Dailymotion** | Primero pregunta destino: **FV Digital**, **F1RD** o **Ambos**; luego Video o Noticia |
 | **Enlace de periódico** | Solo FV Digital (WordPress + redes FV) |
 | **X / Twitter** | Video o Noticia, sin pregunta F1RD |
-| **Cron feed (09:15–21:15)** | Hasta 2 noticias nuevas de FV Digital → webhook FV; hasta 2 de Motorsport + Híbridos (intercaladas) → webhook Formula1RD |
+| **Cron feed (09:15–21:15)** | Hasta 4 noticias nuevas de FV Digital → webhook FV; hasta 2 de Motorsport + Híbridos (intercaladas) → webhook Formula1RD |
 | **Foto + texto** | Crea post con imagen destacada |
 | **Texto largo** (noticia) | Publica tras unos segundos de espera |
 | **Nota de voz** | Transcribe y actúa como texto |
@@ -313,6 +313,25 @@ npm run bot:start
 ```
 
 **No ejecutes `npm run bot` varias veces** ni mezcles `bot` y `bot:start` a la vez.
+
+### Los correos no salen (cron con resultado 1)
+
+Síntoma: el Word/PDF se genera, pero el log termina con
+`Error: connect ETIMEDOUT <ip>:587` y la tarea queda con resultado **1**
+(`Get-ScheduledTaskInfo -TaskName AsistenteWP-REPORTE`).
+
+Causa típica: **una VPN (p. ej. UrbanVPN) bloquea los puertos SMTP** (25, 465, 587, 2525),
+mientras el 443 sigue abierto. Comprobar:
+
+```powershell
+Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name,Status
+Resolve-DnsName 'smtp-relay.brevo.com' -Type A   # debe ser una IP de Brevo, no de la VPN
+Test-NetConnection 'smtp-relay.brevo.com' -Port 587
+```
+
+Solución rápida: **desconecta la VPN** y reenvía el reporte. También puedes enviar por HTTPS
+(443) como respaldo: define `BREVO_API_V3_KEY` (clave de API v3 de Brevo, empieza por `xkeysib-`)
+en `.env`; `sendEmail` la usa automáticamente cuando el SMTP falla.
 
 ### La voz no funciona
 

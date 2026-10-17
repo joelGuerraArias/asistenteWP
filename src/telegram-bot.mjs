@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Input, Markup, Telegraf } from "telegraf";
 import { pathToFileURL } from "node:url";
@@ -14,19 +14,28 @@ import {
   synthesizeSpeech,
   transcribeAudio,
 } from "./audio.mjs";
-import { askDeepseek, buildNewsPostFromOcr, buildNoteFromDocument, composeCardHeadline, correctHeadlineSpelling, correctTradText, enrichTradTextWithResearch, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
+import { askDeepseek, buildNewsPostFromOcr, buildNoteFromDocument, composeCardHeadline, correctHeadlineSpelling, correctTradText, enrichTradTextWithResearch, ensureSpanishCaption, formatNewsBodyHtml, generateNewsHeadline, generateSocialCaption, suggestNewsTitles, translateToSpanish, writeOriginalNews } from "./deepseek.mjs";
 import { generateNewsCard, fetchImageBuffer, LOGO_F1RD_PATH } from "./social-card.mjs";
 import {
   publishToDestinations,
   publishToWebhook,
-  isF1ChoiceUrl,
   destIncludesFv,
   destLabel,
   assertDestWebhooksReady,
   captionForTarget,
   webhookTargets,
 } from "./publish-webhook.mjs";
+import { markFeedLinksSent } from "./feed-repost.mjs";
+import {
+  formatGraphicsFeedHelp,
+  graphicsFeedBrandFromPath,
+  renderGraphicsFeedXml,
+} from "./graphics-feed.mjs";
 import { isPublicR2Url, uploadToR2 } from "./r2.mjs";
+import {
+  archiveProcessedVideoSafe,
+  archiveProducedGraphic,
+} from "./video-archive.mjs";
 import { extractFirstUrl, extractUrlFromMessage, fetchArticleFromUrl, detectSocialPlatform, socialPlatformLabel } from "./news-fetch.mjs";
 import {
   cleanWriteTopic,
@@ -42,7 +51,7 @@ import {
   wantsWriteNews,
 } from "./news-write.mjs";
 import { researchTopic } from "./news-research.mjs";
-import { cleanImportedText, finalizeNewsHtml, textToNewsHtml } from "./news-format.mjs";
+import { cleanImportedText, finalizeNewsHtml, textToNewsHtml, withNewsVideoPlayer } from "./news-format.mjs";
 import { fetchGoogleAlertsForSheet } from "./gmail-alerts.mjs";
 import { replaceAlertsSheet } from "./sheets-alerts.mjs";
 import { cropImageByPercent, mimeFromBuffer } from "./image.mjs";
@@ -80,8 +89,13 @@ import {
   parseHyperAction,
 } from "./hyper-flow.mjs";
 import {
+  articlePreviewKeyboard,
+  askRewriteOpinionText,
+  formatPeriodistaPreview,
   formatWpPreview,
   isWpPreviewConfirm,
+  isWpPreviewOpinion,
+  isWpPreviewRewrite,
   parseWpTopic,
   wpIntroText,
 } from "./wp-flow.mjs";
@@ -103,6 +117,33 @@ import {
   inspectTradVideo,
   continueTradJob,
 } from "./trad-video.mjs";
+import {
+  discardDubJob,
+  finalizeDubJob,
+  prepareDubJob,
+} from "./dub-video.mjs";
+import {
+  buildNdigitalR2Key,
+  composeNdigitalBranded,
+  discardNdigitalJob,
+  generateNdigitalHeadline,
+  prepareNdigitalJob,
+} from "./ndigital-video.mjs";
+import {
+  brandLocalVideo,
+  buildLocalR2Key,
+  discardLocalJob,
+  extractVideoFrame1280x720,
+  prepareLocalVideoJob,
+  toFeatured1280x720,
+} from "./local-video.mjs";
+import {
+  concatVideoWithSie,
+  discardSieWork,
+  markSieUsed,
+  pickNextSieVideo,
+  sieBumperAvailable,
+} from "./sie-bumper.mjs";
 import { isTavilyEnabled, tavilyResearchTopic } from "./tavily.mjs";
 import {
   cancelTermometroFlow,
@@ -133,6 +174,25 @@ import {
   picIntroText,
   setPicPhoto,
 } from "./pic-flow.mjs";
+import {
+  cancelEncuestaFlow,
+  emptyEncuestaDobleFlow,
+  emptyEncuestaFlow,
+  encuestaAskNextPhotoText,
+  encuestaAskQuestionText,
+  encuestaAwaitingPhoto,
+  encuestaAwaitingQuestion,
+  encuestaCancelText,
+  encuestaDobleIntroText,
+  encuestaIntroText,
+  encuestaSpellingDiffers,
+  isEncuestaFlowActive,
+  normalizeEncuestaQuestion,
+  parseEncuestaPhotoCount,
+  setEncuestaPhoto,
+} from "./encuesta-flow.mjs";
+import { generateEncuestaAlphaCard } from "./encuesta-alpha-card.mjs";
+import { generateEncuestaDobleCard } from "./encuesta-doble-card.mjs";
 import {
   formatReporteTelegram,
   runIntrantReport,
@@ -179,8 +239,12 @@ function getSession(chatId) {
       publishDest: "fvdigital",
       pendingTradJob: null,
       pendingTradText: null,
+      pendingDubJob: null,
+      pendingNdigitalJob: null,
+      pendingLocalJob: null,
       termometroFlow: null,
       picFlow: null,
+      encuestaFlow: null,
     });
   }
   return sessions.get(chatId);
@@ -215,7 +279,9 @@ function helpText() {
     "• /noticia · /ocr — captura de pantalla → WP",
     "• /nota — PDF o foto de documento → extrae info + foto",
     "• /auto — modo foto + texto",
-    "• /encuestas — 1 encuesta pendiente → WP + redes FV",
+    "• /encuesta — foto + pregunta → tarjeta ALPHA → webhook (revisa ortografía, no cambia el texto)",
+    "• /encuestadoble — 2/3/4 fotos en círculos + pregunta → webhook",
+    "• /encuestas — 1 encuesta temática (ALPHA) → WP + redes; cron 09:00 y 16:00",
     "• /publicar — publicar el último borrador",
     "• /borrador — listar borradores",
     "• /ver · /verpost — ver un post",
@@ -224,11 +290,16 @@ function helpText() {
     "• /cancelar — cancelar flujo en curso",
     "",
     "Video / redes:",
-    "• /video URL — descarga → R2 → webhook (destino FV/F1RD/ambos)",
-    "• /trad URL — elige: traducir audio o audio desde caption (ES) → webhook",
+    "• /video URL — descarga → R2 → webhook (destino FV/F1RD/ambos; FV pregunta SIE)",
+    "• /trad URL — elige: traducir audio, audio desde caption, o pegar texto (audio+caption) → webhook",
     "• /trad + texto — corregir / traducir / buscar (Tavily) / audio",
+    "• /dub URL — doblaje ElevenLabs a español → reel 9:16 → webhook",
+    "• /ndigital URL — reel N Digital: crop → logo + titular rojo → caption → webhook (FV pregunta SIE)",
+    "• /local — video del PC → STT ES → logo/titular → frame → WP + redes + video webhook",
     "• /foto — Termómetro (nombre + institución + foto)",
-    "• /pic — foto + texto → vista previa → confirmar (FV o F1RD)",
+    "• /pic — foto + texto → vista previa → confirmar (FV o F1RD) → redes",
+    "• /feeds — RSS de gráficos FV Digital y Formula 1 RD (dlvr.it)",
+    "• /pic last — reenvía el último /pic a redes",
     "• /hyper · /hyperframes — HyperFrames (generar / verificar)",
     "• /heygen — video HeyGen",
     "• /remotion — listar composiciones Remotion",
@@ -254,6 +325,83 @@ function unauthorized(ctx) {
 }
 
 const LAST_CHAT_FILE = join(config.root, ".last-chat.json");
+const LAST_PIC_DIR = join(config.root, ".last-pic");
+const LAST_PIC_META = join(LAST_PIC_DIR, "meta.json");
+const LAST_PIC_BG = join(LAST_PIC_DIR, "bg.bin");
+
+function saveLastPic({ title, dest, photoBuffer }) {
+  if (!photoBuffer?.length || !title) return;
+  mkdirSync(LAST_PIC_DIR, { recursive: true });
+  writeFileSync(
+    LAST_PIC_META,
+    JSON.stringify(
+      {
+        title: String(title).trim(),
+        dest: dest || "fvdigital",
+        pending: true,
+        at: new Date().toISOString(),
+      },
+      null,
+      2
+    )
+  );
+  writeFileSync(LAST_PIC_BG, photoBuffer);
+}
+
+function loadLastPic() {
+  if (!existsSync(LAST_PIC_META) || !existsSync(LAST_PIC_BG)) return null;
+  try {
+    const meta = JSON.parse(readFileSync(LAST_PIC_META, "utf8"));
+    const photoBuffer = readFileSync(LAST_PIC_BG);
+    if (!meta?.title || !photoBuffer?.length) return null;
+    return {
+      title: meta.title,
+      dest: meta.dest || "fvdigital",
+      pending: meta.pending !== false,
+      photoBuffer,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function markLastPicSent() {
+  if (!existsSync(LAST_PIC_META)) return;
+  try {
+    const meta = JSON.parse(readFileSync(LAST_PIC_META, "utf8"));
+    meta.pending = false;
+    meta.sentAt = new Date().toISOString();
+    writeFileSync(LAST_PIC_META, JSON.stringify(meta, null, 2));
+  } catch {
+    // ignore
+  }
+}
+
+/** Mismo camino que noticias/escritos: preview Telegram + webhook n8n. */
+async function publishPicToSocial(ctx, { title, photoBuffer, dest }) {
+  const session = getSession(ctx.chat.id);
+  const cleanTitle = String(title || "").trim();
+  if (!cleanTitle || !photoBuffer?.length) {
+    throw new Error("Falta foto o texto del /pic");
+  }
+  const target = dest || session.publishDest || "fvdigital";
+  assertDestWebhooksReady(target);
+  session.publishDest = target;
+  saveLastPic({ title: cleanTitle, dest: target, photoBuffer });
+  await status(ctx, "📤 Enviando gráfico a redes...");
+  const result = await sendSocialCard(ctx, {
+    title: cleanTitle,
+    imageBuffer: photoBuffer,
+    bodyText: cleanTitle,
+    // /pic: solo ortografía ya aplicada; no reescribir titular ni caption
+    lockTitle: true,
+  });
+  if (!result?.ok) {
+    throw new Error(result?.error || "No se pudo enviar a redes");
+  }
+  markLastPicSent();
+  return result;
+}
 
 function rememberChat(ctx) {
   const chatId = ctx.chat?.id;
@@ -627,6 +775,9 @@ async function showPicPreview(ctx, dest) {
       flow.spellingApplied = true;
     }
 
+    // /pic: solo ortografía — no reescribir ni “ajustar” el titular
+    flow.headline = cardTitle;
+
     const card = await generateNewsCard({
       backgroundBuffer: flow.photoBuffer,
       title: cardTitle,
@@ -636,9 +787,10 @@ async function showPicPreview(ctx, dest) {
     flow.dest = dest;
     flow.previewCard = card;
     flow.step = "awaiting_confirm";
+    saveLastPic({ title: cardTitle, dest, photoBuffer: flow.photoBuffer });
 
     const spellNote = headlineWasCorrected(originalHeadline, cardTitle)
-      ? `\n\nTexto corregido:\n${cardTitle}`
+      ? `\n\n✏️ Ortografía corregida:\nAntes: ${originalHeadline}\nAhora: ${cardTitle}`
       : "";
 
     await ctx.replyWithPhoto(Input.fromBuffer(card, "pic-preview.png"), {
@@ -658,16 +810,42 @@ function socialLangForTarget(_target) {
   return "es";
 }
 
-async function sendSocialCard(ctx, { title, imageBuffer = null, imageUrl = null, bodyText = "" }) {
-  if (!config.socialCard.enabled) return;
-  if (!title) return;
+/** Tras WP+redes: anotar el link para que feed-repost no republicque el mismo artículo. */
+function rememberFeedPublished(dest, postLink, title = "", source = "bot") {
+  const link = String(postLink || "").trim();
+  if (!link) return;
+  try {
+    const r = markFeedLinksSent({
+      dest: dest || "fvdigital",
+      links: [link],
+      title,
+      source,
+    });
+    if (r.marked) {
+      console.log(
+        `feed-repost: marcado ${r.marked} link(s) [${r.brands.join(",")}] vía ${source}`
+      );
+    }
+  } catch (error) {
+    console.warn("rememberFeedPublished:", error.message);
+  }
+}
+
+async function sendSocialCard(
+  ctx,
+  { title, imageBuffer = null, imageUrl = null, bodyText = "", lockTitle = false } = {}
+) {
+  if (!config.socialCard.enabled) {
+    return { ok: false, error: "SOCIAL_CARD deshabilitado" };
+  }
+  if (!title) return { ok: false, error: "sin titular" };
 
   try {
     let bg = imageBuffer;
     if (!bg && imageUrl) {
       bg = await fetchImageBuffer(imageUrl);
     }
-    if (!bg) return; // sin imagen de fondo no se genera tarjeta
+    if (!bg) return { ok: false, error: "sin imagen de fondo" };
 
     await ctx.sendChatAction("upload_photo").catch(() => {});
     const session = getSession(ctx.chat.id);
@@ -682,9 +860,11 @@ async function sendSocialCard(ctx, { title, imageBuffer = null, imageUrl = null,
     // Preview: siempre español (FV y F1RD).
     const previewLang = "es";
     const previewTarget = dest === "f1rd" ? "f1rd" : "fvdigital";
-    const cardTitle = await composeCardHeadline(title, bodyText, {
-      lang: previewLang,
-    }).catch(() => title);
+    const cardTitle = lockTitle
+      ? String(title).trim()
+      : await composeCardHeadline(title, bodyText, {
+          lang: previewLang,
+        }).catch(() => title);
     const card = await generateNewsCard({
       backgroundBuffer: bg,
       title: cardTitle,
@@ -698,12 +878,16 @@ async function sendSocialCard(ctx, { title, imageBuffer = null, imageUrl = null,
     });
 
     await sendCardToWebhook(ctx, {
-      title,
-      bodyText,
+      title: lockTitle ? cardTitle : title,
+      bodyText: lockTitle ? cardTitle : bodyText,
       imageBuffer: bg,
+      lockTitle,
     });
+    return { ok: true };
   } catch (error) {
     console.warn("sendSocialCard:", error.message);
+    await ctx.reply(`⚠️ No pude preparar el gráfico: ${error.message}`).catch(() => {});
+    return { ok: false, error: error.message };
   }
 }
 
@@ -721,7 +905,10 @@ async function uploadCardPublicUrl(card, title) {
   return media?.source_url || null;
 }
 
-async function sendCardToWebhook(ctx, { card = null, title, bodyText = "", imageBuffer = null }) {
+async function sendCardToWebhook(
+  ctx,
+  { card = null, title, bodyText = "", imageBuffer = null, lockTitle = false } = {}
+) {
   const session = getSession(ctx.chat.id);
   const dest = session.publishDest || "fvdigital";
   if (destIncludesFv(dest) && !config.publishWebhook?.enabled) {
@@ -746,13 +933,15 @@ async function sendCardToWebhook(ctx, { card = null, title, bodyText = "", image
           ? config.f1rdWebhook?.hashtag || "#Formula1RD"
           : config.publishWebhook?.hashtag || "#fvdigital";
 
-      const cardTitle = await composeCardHeadline(title, bodyText, { lang }).catch(
-        () => title
-      );
-      const captionSeed = await generateSocialCaption(title, bodyText, {
-        hashtag,
-        lang,
-      }).catch(() => `${title}\n\n${hashtag}`.trim());
+      const cardTitle = lockTitle
+        ? String(title || "").trim()
+        : await composeCardHeadline(title, bodyText, { lang }).catch(() => title);
+      const captionSeed = lockTitle
+        ? `${cardTitle}\n\n${hashtag}`.trim()
+        : await generateSocialCaption(title, bodyText, {
+            hashtag,
+            lang,
+          }).catch(() => `${title}\n\n${hashtag}`.trim());
 
       let outCard = card;
       if (bg) {
@@ -831,23 +1020,37 @@ function destChoiceKeyboard() {
   ]);
 }
 
-async function askPublishDest(ctx, { url, extraCategories = [], resume = "link" } = {}) {
+/**
+ * Pregunta siempre FV / F1RD / Ambos antes de publicar.
+ * @param {{ url?: string|null, extraCategories?: string[], resume?: string, text?: string }} opts
+ */
+async function askPublishDest(
+  ctx,
+  { url = null, extraCategories = [], resume = "link", text = "" } = {}
+) {
   const session = getSession(ctx.chat.id);
-  session.pendingDestChoice = { url, extraCategories, resume };
+  // Evita heredar un destino viejo (ej. F1 de un /video anterior).
+  session.publishDest = null;
+  session.pendingDestChoice = {
+    url: url || null,
+    extraCategories,
+    resume,
+    text: String(text || ""),
+  };
   await ctx.reply(
     [
-      "¿A dónde va este enlace?",
+      "¿A qué webhook va esta publicación?",
       "• FV Digital — WordPress + redes FV",
       "• F1RD — solo redes Formula1RD (sin WordPress)",
-      "• Ambos — WordPress FV y los dos webhooks",
+      "• Ambos — WordPress FV + ambos webhooks",
     ].join("\n"),
     { ...destChoiceKeyboard(), disable_web_page_preview: true }
   );
 }
 
-/** true si preguntó destino (IG/FB/YT/Dailymotion). */
+/** Siempre pregunta destino (ya no depende del tipo de URL). */
 async function maybeAskPublishDest(ctx, url, extraCategories = [], resume = "link") {
-  if (!url || !isF1ChoiceUrl(url)) {
+  if (!url) {
     getSession(ctx.chat.id).publishDest = "fvdigital";
     return false;
   }
@@ -862,9 +1065,67 @@ async function resumeAfterPublishDest(ctx, dest, pending) {
   const url = pending.url;
   const extra = pending.extraCategories || [];
   const resume = pending.resume || "link";
-  await ctx.reply(`Destino: ${destLabel(dest)}. Sigo la ruta normal.`, {
+  const text = pending.text || "";
+  await ctx.reply(`Destino: ${destLabel(dest)}. Sigo.`, {
     disable_web_page_preview: true,
   });
+
+  if (resume === "periodista") {
+    await startPeriodistaFlow(ctx, text || "/periodista");
+    return;
+  }
+  if (resume === "escribir") {
+    await startWriteFlow(ctx, text || "/escribir");
+    return;
+  }
+  if (resume === "wp") {
+    await startWpFlow(ctx, text || "/wp");
+    return;
+  }
+  if (resume === "noticia") {
+    session.photoIntent = "noticia";
+    await reply(
+      ctx,
+      "Envía la captura. Extraeré el texto, redactaré la noticia y luego te pediré la foto destacada (siempre con vista previa antes de publicar).",
+      { voice: false }
+    );
+    return;
+  }
+  if (resume === "nota") {
+    session.photoIntent = "nota";
+    if (text) session.buffer.text = text;
+    await reply(
+      ctx,
+      [
+        "📄 /nota — envía un documento",
+        "",
+        "Acepta: PDF o foto del documento.",
+        "Extraigo la información, redacto la nota y, si el archivo trae imagen, la uso; si no, te pido la foto destacada.",
+        text ? `\nNota: ${text}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      { voice: false }
+    );
+    return;
+  }
+  if (resume === "auto") {
+    session.mode = "auto";
+    await reply(
+      ctx,
+      `Modo AUTO — destino ${destLabel(dest)}. Publicación a WordPress/redes según destino.`,
+      { voice: false }
+    );
+    return;
+  }
+  if (resume === "encuestas") {
+    await runEncuestasWithDest(ctx, dest);
+    return;
+  }
+  if (resume === "encuesta_manual") {
+    await sendManualEncuestaToWebhook(ctx, dest);
+    return;
+  }
   if (resume === "video") {
     await processSocialVideoUrl(ctx, url);
     return;
@@ -873,7 +1134,318 @@ async function resumeAfterPublishDest(ctx, dest, pending) {
     await processTradVideoUrl(ctx, url);
     return;
   }
-  await askSocialLinkChoice(ctx, url, extra);
+  if (resume === "dub") {
+    await processDubVideoUrl(ctx, url);
+    return;
+  }
+  if (resume === "ndigital_brand") {
+    await brandAndPreviewNdigital(ctx);
+    return;
+  }
+  if (resume === "ndigital_publish") {
+    await publishNdigitalAfterDest(ctx);
+    return;
+  }
+  if (resume === "local_brand") {
+    await brandAndPreviewLocal(ctx);
+    return;
+  }
+  if (resume === "local_publish") {
+    await publishLocalAfterDest(ctx);
+    return;
+  }
+
+  // Enlace normal: Video/Noticia solo si es YT/IG/FB/X; si no → noticia de artículo (FV o F1).
+  if (url && isSupportedSocialVideoUrl(url)) {
+    await askSocialLinkChoice(ctx, url, extra);
+    return;
+  }
+  if (url) {
+    if (session.writeFlow) cancelWriteFlow(session);
+    await handleNewsFromUrl(ctx, url, extra);
+    return;
+  }
+  await reply(ctx, "No hay URL pendiente. Pega un enlace de nuevo.", {
+    voice: false,
+  });
+}
+
+async function runEncuestasWithDest(ctx, dest = "fvdigital") {
+  await reply(
+    ctx,
+    `Publicando la siguiente encuesta pendiente (${destLabel(dest)})…`,
+    { voice: false }
+  );
+  const { encuestasDailyLimit, runEncuestas } = await import("./encuestas.mjs");
+  const result = await runEncuestas({
+    limit: encuestasDailyLimit(),
+    webhookDest: dest,
+    mode: "tema",
+  });
+  const n = result?.published?.length || 0;
+  const skip = result?.skipped?.length || 0;
+  const errs = result?.errors?.length || 0;
+  if (result?.noneNew) {
+    await reply(ctx, "No hay encuestas nuevas por publicar.", { voice: false });
+    return;
+  }
+  const recycled = result?.recycled ? " (cola reiniciada)" : "";
+  await reply(
+    ctx,
+    `Encuestas listas [${result?.source || "tema"}]. Publicadas: ${n} | omitidas (sin foto): ${skip} | errores: ${errs}${recycled}`,
+    { voice: false }
+  );
+}
+
+async function handleEncuestaPhoto(ctx, imageBuffer, mimeType, caption = "") {
+  const session = getSession(ctx.chat.id);
+  if (!session.encuestaFlow) session.encuestaFlow = emptyEncuestaFlow();
+  const flow = session.encuestaFlow;
+
+  if (flow.mode === "doble") {
+    if (flow.step !== "awaiting_photos") {
+      await reply(
+        ctx,
+        "Primero dime de cuántas fotos será (2, 3 o 4).",
+        { voice: false }
+      );
+      return;
+    }
+    flow.photos.push(imageBuffer);
+    const have = flow.photos.length;
+    const need = flow.photoCount;
+    await reply(ctx, `✅ Foto ${have}/${need} recibida.`, { voice: false });
+    if (have < need) {
+      await reply(ctx, encuestaAskNextPhotoText(flow), { voice: false });
+      return;
+    }
+    flow.step = "awaiting_question";
+    const maybeQ = normalizeEncuestaQuestion(caption);
+    if (maybeQ.length >= 8) {
+      await finishEncuestaWithQuestion(ctx, maybeQ);
+      return;
+    }
+    await reply(ctx, encuestaAskQuestionText(), { voice: false });
+    return;
+  }
+
+  setEncuestaPhoto(session, imageBuffer, mimeType);
+  const maybeQ =
+    normalizeEncuestaQuestion(caption) ||
+    normalizeEncuestaQuestion(flow.question || "");
+  if (maybeQ.length >= 5) {
+    await finishEncuestaWithQuestion(ctx, maybeQ);
+    return;
+  }
+  await reply(ctx, encuestaAskQuestionText(), { voice: false });
+}
+
+async function handleEncuestaFlowText(ctx, trimmed) {
+  const session = getSession(ctx.chat.id);
+  const flow = session.encuestaFlow;
+  if (!flow) return false;
+
+  if (flow.mode === "doble" && flow.step === "awaiting_count") {
+    const n = parseEncuestaPhotoCount(trimmed);
+    if (![2, 3, 4].includes(n)) {
+      await reply(ctx, "Responde solo con 2, 3 o 4.", { voice: false });
+      return true;
+    }
+    flow.photoCount = n;
+    flow.photos = [];
+    flow.step = "awaiting_photos";
+    await reply(
+      ctx,
+      `Perfecto: encuesta de ${n} fotos.\n${encuestaAskNextPhotoText(flow)}`,
+      { voice: false }
+    );
+    return true;
+  }
+
+  if (flow.step === "awaiting_question") {
+    await finishEncuestaWithQuestion(ctx, trimmed);
+    return true;
+  }
+
+  if (flow.mode === "doble" && flow.step === "awaiting_photos") {
+    await reply(ctx, encuestaAskNextPhotoText(flow), { voice: false });
+    return true;
+  }
+
+  if (flow.step === "awaiting_photo") {
+    await reply(ctx, "Envía la foto de la encuesta primero.", { voice: false });
+    return true;
+  }
+
+  return false;
+}
+
+async function finishEncuestaWithQuestion(ctx, questionRaw) {
+  const session = getSession(ctx.chat.id);
+  const flow = session.encuestaFlow;
+  const isDoble = flow?.mode === "doble";
+  if (isDoble) {
+    if (!flow.photos?.length || flow.photos.length !== flow.photoCount) {
+      throw new Error(
+        `Faltan fotos. Van ${flow.photos?.length || 0} de ${flow.photoCount}.`
+      );
+    }
+  } else if (!flow?.photoBuffer) {
+    throw new Error("Falta la foto. Envía /encuesta y luego la foto.");
+  }
+  const question = normalizeEncuestaQuestion(questionRaw);
+  if (question.length < 5) {
+    await reply(ctx, "La pregunta es muy corta. Escríbela completa:", {
+      voice: false,
+    });
+    return;
+  }
+
+  flow.question = question;
+  flow.step = "building";
+
+  await reply(ctx, "📝 Revisando ortografía (sin cambiar tu texto)…", {
+    voice: false,
+  });
+  let suggested = question;
+  try {
+    suggested = (await correctHeadlineSpelling(question)).trim() || question;
+  } catch (err) {
+    console.warn("encuesta spelling:", err.message);
+  }
+
+  if (encuestaSpellingDiffers(question, suggested)) {
+    flow.spellingNote = suggested;
+    await reply(
+      ctx,
+      [
+        "⚠️ Posible ortografía / tildes distintas (mantengo tu texto):",
+        `Tu pregunta: «${question}»`,
+        `Sugerencia: «${suggested}»`,
+      ].join("\n"),
+      { voice: false }
+    );
+  } else {
+    flow.spellingNote = "";
+    await reply(ctx, "✅ Ortografía OK. Montando la tarjeta…", { voice: false });
+  }
+
+  await reply(
+    ctx,
+    isDoble
+      ? `🎨 Generando tarjeta con ${flow.photoCount} rostros en círculo…`
+      : "🎨 Generando tarjeta ALPHA…",
+    { voice: false }
+  );
+  const cardBuffer = isDoble
+    ? await generateEncuestaDobleCard({
+        photoBuffers: flow.photos,
+        title: question,
+      })
+    : await generateEncuestaAlphaCard({
+        photoBuffer: flow.photoBuffer,
+        title: question,
+      });
+  flow.cardBuffer = cardBuffer;
+
+  try {
+    archiveProducedGraphic({
+      buffer: cardBuffer,
+      caption: question,
+      ext: ".png",
+      nameHint: isDoble ? `encuesta-${flow.photoCount}f` : "encuesta",
+    });
+  } catch (err) {
+    console.warn("encuesta archive:", err.message);
+  }
+
+  if (!config.r2?.enabled) {
+    await ctx.replyWithPhoto(Input.fromBuffer(cardBuffer, "encuesta.png"), {
+      caption: question,
+    });
+    cancelEncuestaFlow(session);
+    await reply(
+      ctx,
+      "Tarjeta lista (R2 no configurado). No pude enviar al webhook.",
+      { voice: false }
+    );
+    return;
+  }
+
+  await reply(ctx, "📦 Subiendo a R2…", { voice: false });
+  const r2Key = `encuestas/encuesta-${Date.now()}.png`;
+  const imageUrl = await uploadToR2(cardBuffer, r2Key, "image/png");
+  if (!isPublicR2Url(imageUrl)) {
+    throw new Error("La URL R2 de la encuesta no es pública.");
+  }
+  flow.imageUrl = imageUrl;
+  flow.r2Key = r2Key;
+  flow.step = "awaiting_dest";
+
+  await ctx.replyWithPhoto(Input.fromBuffer(cardBuffer, "encuesta.png"), {
+    caption: question,
+  });
+
+  await askPublishDest(ctx, { resume: "encuesta_manual" });
+}
+
+async function sendManualEncuestaToWebhook(ctx, dest = "fvdigital") {
+  const session = getSession(ctx.chat.id);
+  const flow = session.encuestaFlow;
+  if (!flow?.imageUrl || !flow?.question) {
+    throw new Error("No hay encuesta lista. Usa /encuesta (foto + pregunta).");
+  }
+
+  assertDestWebhooksReady(dest);
+  const hashtag =
+    dest === "f1rd"
+      ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+      : config.publishWebhook?.hashtag || "#fvdigital";
+  const caption = ensureCaptionHashtag(flow.question, dest) || `${flow.question}\n\n${hashtag}`;
+
+  await reply(ctx, `📤 Enviando encuesta a ${destLabel(dest)}…`, {
+    voice: false,
+  });
+  const results = await publishToDestinations(dest, {
+    caption,
+    title: flow.question,
+    imageUrl: flow.imageUrl,
+    r2Key: flow.r2Key || null,
+    mediaType: "IMAGE",
+  });
+  const failed = results.filter((r) => !r.ok);
+  const ok = results.filter((r) => r.ok);
+  cancelEncuestaFlow(session);
+  session.publishDest = "fvdigital";
+
+  if (!ok.length) {
+    throw new Error(failed[0]?.error || `HTTP ${failed[0]?.status}`);
+  }
+  const queued = ok.some((r) => r.queued);
+  await reply(
+    ctx,
+    [
+      queued
+        ? `Encuesta encolada en n8n (${destLabel(dest)}).`
+        : `Encuesta enviada a ${destLabel(dest)}.`,
+      flow.imageUrl,
+      "",
+      caption,
+      flow.spellingNote
+        ? `\n(Nota: hubo sugerencia ortográfica; se publicó tu texto original.)`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    { voice: false, disable_web_page_preview: true }
+  );
+  if (failed.length) {
+    await reply(
+      ctx,
+      `Falló: ${failed.map((f) => f.target).join(", ")} — ${failed[0].error || failed[0].status}`,
+      { voice: false }
+    );
+  }
 }
 
 function socialLinkChoiceKeyboard() {
@@ -927,6 +1499,30 @@ function socialVideoConfirmKeyboard() {
   ]);
 }
 
+function ndigitalPreviewKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Publicar", "ndigital:publish")],
+    [Markup.button.callback("❌ Cancelar", "ndigital:cancel")],
+  ]);
+}
+
+function localPreviewKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Publicar", "local:publish")],
+    [Markup.button.callback("❌ Cancelar", "local:cancel")],
+  ]);
+}
+
+function sieConcatKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("✅ Sí, concatenar SIE", "sie:yes"),
+      Markup.button.callback("No, enviar así", "sie:no"),
+    ],
+    [Markup.button.callback("❌ Cancelar", "sie:cancel")],
+  ]);
+}
+
 function ensureCaptionHashtag(caption = "", dest = "fvdigital") {
   if (dest === "both") {
     let base = String(caption || "")
@@ -943,10 +1539,93 @@ function ensureCaptionHashtag(caption = "", dest = "fvdigital") {
   return captionForTarget(caption, dest === "f1rd" ? "f1rd" : "fvdigital");
 }
 
+/**
+ * Adjunta paquete de noticia WP al pendiente (titular + HTML + frame 1280×720).
+ * Se publica al confirmar Enviar, junto con el video a redes.
+ */
+async function attachWpNewsToPending(
+  pending,
+  {
+    videoBuffer,
+    textSeed = "",
+    titleHint = "",
+    dest = "fvdigital",
+    onStatus,
+  } = {}
+) {
+  if (!pending || !destIncludesFv(dest)) {
+    if (pending) pending.publishNews = false;
+    return pending;
+  }
+  pending.publishNews = true;
+  const seed = String(textSeed || "").trim();
+  let newsTitle = String(titleHint || pending.title || "Video").trim();
+
+  if (Buffer.isBuffer(videoBuffer) && videoBuffer.length > 1000) {
+    try {
+      onStatus?.("🖼️ Frame 1280×720 para WordPress…");
+      pending.frameBuffer = await extractVideoFrame1280x720(videoBuffer, {
+        onStatus,
+      });
+    } catch (err) {
+      console.warn("attachWpNews frame:", err.message);
+    }
+  }
+
+  if (seed.length >= 20) {
+    try {
+      const formatted = await formatNewsBodyHtml({
+        text: seed,
+        title: newsTitle,
+        topic: "noticia en video",
+      });
+      pending.body_html = finalizeNewsHtml(
+        coerceArticleHtml(formatted.content_html),
+        { skipSource: true }
+      );
+      newsTitle = formatted.title || newsTitle;
+    } catch {
+      const paras = seed
+        .split(/(?<=[.!?])\s+/)
+        .filter(Boolean)
+        .slice(0, 8)
+        .map((p) => `<p>${p.replace(/</g, "&lt;")}</p>`)
+        .join("\n");
+      pending.body_html = finalizeNewsHtml(paras || `<p>${newsTitle}</p>`, {
+        skipSource: true,
+      });
+    }
+    pending.excerpt = seed.slice(0, 280);
+  } else if (!pending.body_html) {
+    pending.body_html = finalizeNewsHtml(`<p>${newsTitle}</p>`, {
+      skipSource: true,
+    });
+    pending.excerpt = newsTitle.slice(0, 280);
+  }
+
+  pending.newsTitle = newsTitle;
+  if (!pending.title) pending.title = newsTitle;
+  return pending;
+}
+
 async function askSocialVideoConfirm(ctx, pending) {
+  const session = getSession(ctx.chat.id);
+  const dest = pending.dest || session.publishDest || "fvdigital";
+  pending.dest = dest;
+  session.pendingSocialVideo = pending;
+
   const label = socialVideoPlatformLabel(pending.platform);
   const mb = (pending.bytes / 1024 / 1024).toFixed(1);
   const isTrad = pending.kind === "trad";
+  const isNdigital = pending.kind === "ndigital";
+  const isLocal = pending.kind === "local";
+  const sieHint = destIncludesFv(dest)
+    ? "Tras Enviar te preguntaré si concateno un bumper SIE."
+    : "Destino solo F1RD → se envía sin bumper SIE.";
+  const newsHint =
+    pending.publishNews !== false && destIncludesFv(dest)
+      ? "También crearé noticia WP: titular + imagen 1280×720 + categorías fv/tweet2/tema."
+      : "";
   const text = [
     isTrad && pending.captionFallback
       ? `🎬 Reel listo (9:16 · ${label} · ${mb} MB · voz desde caption${pending.includeHeadline === false ? " · sin titular" : ""})`
@@ -954,7 +1633,11 @@ async function askSocialVideoConfirm(ctx, pending) {
       ? `🎬 Reel listo (9:16 · ${label} · ${mb} MB · ya en español${pending.includeHeadline === false ? " · sin titular" : ""})`
       : isTrad
         ? `🎬 Reel traducido listo (9:16 · ${label} · ${mb} MB · doblaje pabmatos${pending.includeHeadline === false ? " · sin titular" : ""})`
-        : `🎬 Video listo (${label} · ${mb} MB)`,
+        : isNdigital
+          ? `🎬 /ndigital listo (${label} · ${mb} MB · crop overlays)`
+          : isLocal
+            ? `🎬 /local listo (${mb} MB · video + noticia WP)`
+          : `🎬 Video listo (${label} · ${mb} MB)`,
     `Origen: ${pending.sourceUrl}`,
     `R2 (público): ${pending.videoUrl}`,
     isTrad && pending.language ? `Idioma detectado: ${pending.language}` : "",
@@ -962,8 +1645,10 @@ async function askSocialVideoConfirm(ctx, pending) {
     "📝 Caption propuesto:",
     pending.caption,
     "",
-    `Destino: ${destLabel(getSession(ctx.chat.id).publishDest || "fvdigital")}`,
-    "¿Lo envío? (el destino ya está elegido)",
+    `Destino: ${destLabel(dest)}`,
+    newsHint,
+    sieHint,
+    "¿Lo envío?",
   ]
     .filter(Boolean)
     .join("\n");
@@ -1016,19 +1701,94 @@ async function processSocialVideoUrl(ctx, sourceUrl) {
   const rawCaption = await generateSocialCaption(
     downloaded.title,
     downloaded.description || downloaded.title,
-    { hashtag }
+    { hashtag, stickToSource: true }
   ).catch(() => downloaded.title);
   const caption = ensureCaptionHashtag(rawCaption, dest);
+  await archiveProcessedVideoSafe({
+    buffer: downloaded.buffer,
+    caption,
+    url: videoUrl,
+    nameHint: key.match(/(\d{8}-\d{6})/)?.[1] || "",
+  });
+
+  // También prepara noticia WP (titular + frame 1280×720 + texto del audio)
+  let news = {
+    publishNews: destIncludesFv(dest),
+    newsTitle: downloaded.title,
+    body_html: "",
+    excerpt: "",
+    frameBuffer: null,
+  };
+  if (news.publishNews) {
+    try {
+      await reply(ctx, "📰 Preparando noticia WP (audio + frame 1280×720)…", {
+        voice: false,
+      });
+      const ext = downloaded.ext || ".mp4";
+      const job = await prepareLocalVideoJob(downloaded.buffer, {
+        fileName: `social${ext.startsWith(".") ? ext : `.${ext}`}`,
+        titleHint: downloaded.title || "",
+        descriptionHint: downloaded.description || "",
+        onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+      });
+      try {
+        const seed =
+          job.transcriptEs || job.transcript || downloaded.description || "";
+        news.newsTitle = job.headline || job.title || downloaded.title;
+        news.excerpt = String(seed).slice(0, 280);
+        news.frameBuffer = job.frameBuffer || null;
+        try {
+          const formatted = await formatNewsBodyHtml({
+            text: seed,
+            title: news.newsTitle,
+            topic: "noticia en video",
+          });
+          news.body_html = finalizeNewsHtml(
+            coerceArticleHtml(formatted.content_html),
+            { skipSource: true }
+          );
+          news.newsTitle = formatted.title || news.newsTitle;
+        } catch {
+          const paras = String(seed)
+            .split(/(?<=[.!?])\s+/)
+            .filter(Boolean)
+            .slice(0, 8)
+            .map((p) => `<p>${p.replace(/</g, "&lt;")}</p>`)
+            .join("\n");
+          news.body_html = finalizeNewsHtml(
+            paras || `<p>${news.newsTitle}</p>`,
+            { skipSource: true }
+          );
+        }
+      } finally {
+        await discardLocalJob(job).catch(() => {});
+      }
+    } catch (err) {
+      console.warn("video→noticia prep:", err.message);
+      news.publishNews = false;
+      await reply(
+        ctx,
+        `⚠️ El video se puede enviar, pero no armé la noticia WP: ${err.message}`,
+        { voice: false }
+      );
+    }
+  }
 
   const pending = {
+    kind: "video",
     videoUrl,
     r2Key: key,
-    title: downloaded.title,
+    title: news.newsTitle || downloaded.title,
     caption,
     sourceUrl: downloaded.sourceUrl,
     platform: downloaded.platform,
     bytes: downloaded.bytes,
     step: "confirm",
+    publishNews: news.publishNews,
+    newsTitle: news.newsTitle,
+    body_html: news.body_html,
+    excerpt: news.excerpt,
+    frameBuffer: news.frameBuffer,
   };
   session.pendingSocialVideo = pending;
   session.lastVideo = {
@@ -1066,6 +1826,9 @@ function tradSourceModeKeyboard(job) {
       ),
     ]);
   }
+  rows.push([
+    Markup.button.callback("📋 Pegar texto (audio + caption)", "trad:source:text"),
+  ]);
   rows.push([Markup.button.callback("❌ Cancelar", "trad:source:cancel")]);
   return Markup.inlineKeyboard(rows);
 }
@@ -1080,6 +1843,7 @@ async function askTradSourceMode(ctx, job) {
     job.hasCaption
       ? "• Crear audio desde el caption — traduzco el caption a español y genero la narración"
       : "• (Sin caption/descripción)",
+    "• Pegar texto — envías el guion; creo el audio y el caption a partir de ese texto",
     "",
     "Elige una opción:",
   ];
@@ -1087,15 +1851,19 @@ async function askTradSourceMode(ctx, job) {
 }
 
 async function askTradHeadlineConfirm(ctx, job) {
+  const voiceNote =
+    job.overlayOnly
+      ? "El video ya está en español (solo reel 9:16)."
+      : job.sourceMode === "from_text"
+        ? "Voz y caption generados desde el texto que pegaste."
+        : job.captionFallback || job.sourceMode === "from_caption"
+          ? "Voz generada desde el caption (traducido a español)."
+          : "Incluye doblaje pabmatos desde el audio.";
   const text = [
     "📰 Titular propuesto:",
     `«${job.headline || "(sin titular)"}»`,
     "",
-    job.overlayOnly
-      ? "El video ya está en español (solo reel 9:16)."
-      : job.captionFallback || job.sourceMode === "from_caption"
-        ? "Voz generada desde el caption (traducido a español)."
-        : "Incluye doblaje pabmatos desde el audio.",
+    voiceNote,
     "",
     "¿Pongo este titular sobre el video?",
   ].join("\n");
@@ -1183,6 +1951,7 @@ async function generateTradTextAudio(ctx, draft) {
   const audioPath = await synthesizeSpeech(draft, {
     voiceId,
     preferMistral: true,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
   });
   try {
     const buf = await readTempFile(audioPath);
@@ -1342,6 +2111,7 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
       ? config.f1rdWebhook?.hashtag || "#Formula1RD"
       : config.publishWebhook?.hashtag || "#fvdigital";
   const captionSeed =
+    built.socialCaptionSeed ||
     built.headline ||
     built.translation?.slice(0, 280) ||
     built.description?.slice(0, 280) ||
@@ -1350,15 +2120,23 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
   const rawCaption = await generateSocialCaption(
     built.title || "Video",
     captionSeed,
-    { hashtag }
-  ).catch(() => captionSeed);
+    { hashtag, stickToSource: true }
+  ).catch(() =>
+    typeof captionSeed === "string" ? captionSeed.slice(0, 400) : "Video"
+  );
   const caption = ensureCaptionHashtag(rawCaption, dest);
+  await archiveProcessedVideoSafe({
+    buffer: built.buffer,
+    caption,
+    url: videoUrl,
+    nameHint: key.match(/(\d{8}-\d{6})/)?.[1] || "",
+  });
 
   const pending = {
     kind: "trad",
     videoUrl,
     r2Key: key,
-    title: built.title,
+    title: built.headline || built.title,
     caption,
     sourceUrl: built.sourceUrl,
     platform: built.platform,
@@ -1370,6 +2148,604 @@ async function finishTradAfterHeadlineChoice(ctx, includeHeadline) {
     captionFallback: built.captionFallback,
     includeHeadline: built.includeHeadline,
     step: "confirm",
+    publishNews: destIncludesFv(dest),
+  };
+  await attachWpNewsToPending(pending, {
+    videoBuffer: built.buffer,
+    textSeed: captionSeed,
+    titleHint: built.headline || built.title,
+    dest,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+  session.pendingSocialVideo = pending;
+  session.lastVideo = {
+    title: pending.title,
+    caption: pending.caption,
+    videoUrl: pending.videoUrl,
+    at: new Date().toISOString(),
+  };
+
+  await askSocialVideoConfirm(ctx, pending);
+}
+
+async function askDubHeadlineConfirm(ctx, job) {
+  const text = [
+    "📰 Titular propuesto:",
+    `«${job.headline || "(sin titular)"}»`,
+    "",
+    "Doblaje ElevenLabs listo (voz clonada → español).",
+    "",
+    "¿Pongo este titular sobre el video?",
+  ].join("\n");
+
+  await ctx.reply(
+    text,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback("✅ Sí, con titular", "dub:headline:yes"),
+        Markup.button.callback("Sin titular", "dub:headline:no"),
+      ],
+      [Markup.button.callback("❌ Cancelar", "dub:headline:cancel")],
+    ])
+  );
+}
+
+async function finishDubAfterHeadlineChoice(ctx, includeHeadline) {
+  const session = getSession(ctx.chat.id);
+  const job = session.pendingDubJob;
+  if (!job) {
+    throw new Error("No hay preparación /dub pendiente. Vuelve a enviar /dub URL.");
+  }
+
+  session.pendingDubJob = null;
+  session.pendingSocialVideo = null;
+
+  const built = await finalizeDubJob(job, {
+    includeHeadline,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  await reply(ctx, "📦 Subiendo reel 9:16 a R2…", { voice: false });
+  const key =
+    built.r2KeyHint ||
+    buildSocialVideoR2Key(built.ext).replace("videos/fv-", "videos/dub-");
+  const videoUrl = await uploadToR2(built.buffer, key, built.contentType);
+  if (!isPublicR2Url(videoUrl)) {
+    throw new Error(
+      "La URL generada no es la pública de R2. Revisa R2_PUBLIC_BASE_URL."
+    );
+  }
+
+  await reply(ctx, "✍️ Generando caption…", { voice: false });
+  const dest = session.publishDest || "fvdigital";
+  const hashtag =
+    dest === "f1rd"
+      ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+      : config.publishWebhook?.hashtag || "#fvdigital";
+  const captionSeed =
+    built.socialCaptionSeed ||
+    built.headline ||
+    built.description?.slice(0, 280) ||
+    built.title ||
+    "Video doblado";
+  const rawCaption = await generateSocialCaption(
+    built.title || "Video",
+    captionSeed,
+    { hashtag, stickToSource: true }
+  ).catch(() =>
+    typeof captionSeed === "string" ? captionSeed.slice(0, 400) : "Video"
+  );
+  const caption = ensureCaptionHashtag(rawCaption, dest);
+  await archiveProcessedVideoSafe({
+    buffer: built.buffer,
+    caption,
+    url: videoUrl,
+    nameHint: key.match(/(\d{8}-\d{6})/)?.[1] || "",
+  });
+
+  const pending = {
+    kind: "dub",
+    videoUrl,
+    r2Key: key,
+    title: built.headline || built.title,
+    caption,
+    sourceUrl: built.sourceUrl,
+    platform: built.platform,
+    bytes: built.bytes,
+    language: built.language,
+    headline: built.headline,
+    includeHeadline: built.includeHeadline,
+    step: "confirm",
+    publishNews: destIncludesFv(dest),
+  };
+  await attachWpNewsToPending(pending, {
+    videoBuffer: built.buffer,
+    textSeed: captionSeed,
+    titleHint: built.headline || built.title,
+    dest,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+  session.pendingSocialVideo = pending;
+  session.lastVideo = {
+    title: pending.title,
+    caption: pending.caption,
+    videoUrl: pending.videoUrl,
+    at: new Date().toISOString(),
+  };
+
+  await askSocialVideoConfirm(ctx, pending);
+}
+
+async function processDubVideoUrl(ctx, sourceUrl) {
+  const dest = getSession(ctx.chat.id).publishDest || "fvdigital";
+  if (!config.r2?.enabled) {
+    throw new Error("R2 no está configurado. Revisa R2_* en .env.");
+  }
+  assertDestWebhooksReady(dest);
+  if (!config.dub?.elevenApiKey) {
+    throw new Error("Falta ELEVENLABS_API_KEY en .env para /dub.");
+  }
+  if (!isSupportedSocialVideoUrl(sourceUrl)) {
+    throw new Error(
+      "URL no soportada. Usa YouTube, Instagram, Facebook, Dailymotion o X."
+    );
+  }
+
+  const session = getSession(ctx.chat.id);
+  if (session.pendingDubJob) {
+    await discardDubJob(session.pendingDubJob);
+    session.pendingDubJob = null;
+  }
+  if (session.pendingTradJob) {
+    await discardTradJob(session.pendingTradJob);
+    session.pendingTradJob = null;
+  }
+  session.pendingSocialVideo = null;
+
+  await reply(
+    ctx,
+    "⏳ /dub: descargando video y enviando a ElevenLabs Dubbing…",
+    { voice: false }
+  );
+
+  const job = await prepareDubJob(sourceUrl, {
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  session.pendingDubJob = job;
+  session.pendingSocialVideo = {
+    kind: "dub",
+    step: "ask_headline",
+    sourceUrl: job.sourceUrl,
+    headline: job.headline,
+  };
+
+  await askDubHeadlineConfirm(ctx, job);
+}
+
+async function processNdigitalVideoUrl(ctx, sourceUrl) {
+  if (!isSupportedSocialVideoUrl(sourceUrl)) {
+    throw new Error(
+      "URL no soportada. Usa YouTube, Instagram, Facebook, Dailymotion o X."
+    );
+  }
+
+  const session = getSession(ctx.chat.id);
+  if (session.pendingNdigitalJob) {
+    await discardNdigitalJob(session.pendingNdigitalJob);
+    session.pendingNdigitalJob = null;
+  }
+  session.pendingSocialVideo = null;
+
+  await reply(ctx, "⏳ /ndigital: descargando y recortando…", { voice: false });
+
+  const job = await prepareNdigitalJob(sourceUrl, {
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  await reply(ctx, "✍️ Generando titular según el tema…", { voice: false });
+  const headline = await generateNdigitalHeadline(job).catch(
+    () => job.title || "Video"
+  );
+  job.headline = headline;
+
+  session.pendingNdigitalJob = job;
+  session.pendingSocialVideo = {
+    kind: "ndigital",
+    step: "await_dest",
+    sourceUrl: job.sourceUrl,
+    platform: job.platform,
+    title: job.title,
+    headline,
+    bytes: job.bytes,
+  };
+
+  await reply(
+    ctx,
+    [
+      `Titular propuesto:`,
+      `«${headline}»`,
+      "",
+      "Elige destino (logo FV o F1RD) y te mando el preview con marca.",
+    ].join("\n"),
+    { voice: false }
+  );
+  await askPublishDest(ctx, {
+    url: job.sourceUrl,
+    resume: "ndigital_brand",
+  });
+}
+
+async function brandAndPreviewNdigital(ctx) {
+  const session = getSession(ctx.chat.id);
+  const dest = session.publishDest || "fvdigital";
+  const job = session.pendingNdigitalJob;
+  if (!job?.localPath) {
+    throw new Error("No hay recorte /ndigital pendiente. Usa /ndigital con una URL.");
+  }
+
+  // Si ya brandearon y cambian destino, recompone desde el crop limpio.
+  if (job.croppedPath && existsSync(job.croppedPath)) {
+    job.localPath = job.croppedPath;
+    job.branded = false;
+  }
+
+  const logoDest = dest === "f1rd" ? "f1rd" : "fvdigital";
+  await composeNdigitalBranded(job, {
+    headline: job.headline,
+    dest: logoDest,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  session.pendingNdigitalJob = job;
+  session.pendingSocialVideo = {
+    kind: "ndigital",
+    step: "preview",
+    sourceUrl: job.sourceUrl,
+    platform: job.platform,
+    title: job.title,
+    headline: job.headline,
+    bytes: job.bytes,
+  };
+
+  const mb = (job.bytes / 1024 / 1024).toFixed(1);
+  const caption = [
+    `✂️ /ndigital listo (${job.cropTop}px↑ / ${job.cropBottom}px↓ / −${job.trimEndSec}s)`,
+    `Logo: ${logoDest === "f1rd" ? "F1RD" : "FV Digital"} · ${mb} MB`,
+    `Titular: «${job.headline}»`,
+    "Revisa el video. Si está bien, toca Publicar.",
+  ].join("\n");
+
+  try {
+    await ctx.replyWithVideo(Input.fromLocalFile(job.localPath), {
+      caption,
+      supports_streaming: true,
+      ...ndigitalPreviewKeyboard(),
+    });
+  } catch (err) {
+    await reply(
+      ctx,
+      `${caption}\n\n⚠️ No pude adjuntar el preview (${err.message}). Aún puedes publicar o cancelar.`,
+      { voice: false, ...ndigitalPreviewKeyboard() }
+    );
+  }
+}
+
+async function publishNdigitalAfterDest(ctx) {
+  const session = getSession(ctx.chat.id);
+  const dest = session.publishDest || "fvdigital";
+  const job = session.pendingNdigitalJob;
+  if (!job?.localPath) {
+    throw new Error("No hay recorte /ndigital pendiente. Usa /ndigital con una URL.");
+  }
+  if (!config.r2?.enabled) {
+    throw new Error("R2 no está configurado. Revisa R2_* en .env.");
+  }
+  assertDestWebhooksReady(dest);
+
+  // Asegura marca según destino elegido
+  if (!job.branded || (dest === "f1rd" && job.dest !== "f1rd") || (dest !== "f1rd" && job.dest === "f1rd")) {
+    if (job.croppedPath && existsSync(job.croppedPath)) {
+      job.localPath = job.croppedPath;
+      job.branded = false;
+    }
+    await composeNdigitalBranded(job, {
+      headline: job.headline,
+      dest: dest === "f1rd" ? "f1rd" : "fvdigital",
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+  }
+
+  await reply(ctx, "📦 Subiendo a R2…", { voice: false });
+  const { readFile } = await import("node:fs/promises");
+  const buffer = job.buffer || (await readFile(job.localPath));
+  const key = buildNdigitalR2Key(".mp4");
+  const videoUrl = await uploadToR2(buffer, key, "video/mp4");
+  if (!isPublicR2Url(videoUrl)) {
+    throw new Error(
+      "La URL generada no es la pública de R2. Revisa R2_PUBLIC_BASE_URL."
+    );
+  }
+
+  await reply(ctx, "✍️ Generando caption según el tema…", { voice: false });
+  const hashtag =
+    dest === "f1rd"
+      ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+      : config.publishWebhook?.hashtag || "#fvdigital";
+  const rawCaption = await generateSocialCaption(
+    job.headline || job.title,
+    job.description || job.title,
+    { hashtag, stickToSource: true }
+  ).catch(() => job.headline || job.title);
+  const caption = ensureCaptionHashtag(rawCaption, dest);
+  await archiveProcessedVideoSafe({
+    buffer,
+    caption,
+    url: videoUrl,
+    nameHint: key.match(/(\d{8}-\d{6})/)?.[1] || "",
+  });
+
+  await discardNdigitalJob(job);
+  session.pendingNdigitalJob = null;
+
+  const pending = {
+    kind: "ndigital",
+    videoUrl,
+    r2Key: key,
+    title: job.headline || job.title,
+    caption,
+    sourceUrl: job.sourceUrl,
+    platform: job.platform,
+    bytes: buffer.length,
+    step: "confirm",
+    publishNews: destIncludesFv(dest),
+  };
+  await attachWpNewsToPending(pending, {
+    videoBuffer: buffer,
+    textSeed: job.description || job.headline || job.title || caption,
+    titleHint: job.headline || job.title,
+    dest,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+  session.pendingSocialVideo = pending;
+  session.lastVideo = {
+    title: pending.title,
+    caption: pending.caption,
+    videoUrl: pending.videoUrl,
+    at: new Date().toISOString(),
+  };
+
+  await askSocialVideoConfirm(ctx, pending);
+}
+
+async function processLocalVideoUpload(ctx, buffer, fileName = "video.mp4") {
+  if (!config.r2?.enabled) {
+    throw new Error("R2 no está configurado. Revisa R2_* en .env.");
+  }
+  if (!config.audio?.mistralApiKey && !config.audio?.openaiApiKey) {
+    throw new Error("Falta MISTRAL_API_KEY o OPENAI_API_KEY para /local.");
+  }
+
+  const session = getSession(ctx.chat.id);
+  if (session.pendingLocalJob) {
+    await discardLocalJob(session.pendingLocalJob);
+    session.pendingLocalJob = null;
+  }
+  session.pendingSocialVideo = null;
+
+  await reply(ctx, "⏳ /local: procesando video del equipo…", { voice: false });
+
+  const job = await prepareLocalVideoJob(buffer, {
+    fileName,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  session.pendingLocalJob = job;
+  session.pendingSocialVideo = {
+    kind: "local",
+    step: "await_dest",
+    sourceUrl: job.sourceUrl,
+    platform: "local",
+    title: job.title,
+    headline: job.headline,
+    bytes: job.bytes,
+  };
+
+  const langNote = job.translated
+    ? `Idioma: ${job.language || "otro"} → traducido al español.`
+    : `Idioma: español (${job.language || "es"}).`;
+
+  await reply(
+    ctx,
+    [
+      langNote,
+      "",
+      "Titular propuesto:",
+      `«${job.headline}»`,
+      "",
+      "Elige destino (logo FV o F1RD) y te mando el preview con marca.",
+    ].join("\n"),
+    { voice: false }
+  );
+  await askPublishDest(ctx, {
+    url: job.sourceUrl,
+    resume: "local_brand",
+  });
+}
+
+async function brandAndPreviewLocal(ctx) {
+  const session = getSession(ctx.chat.id);
+  const dest = session.publishDest || "fvdigital";
+  const job = session.pendingLocalJob;
+  if (!job?.localPath) {
+    throw new Error("No hay video /local pendiente. Usa /local y envía el archivo.");
+  }
+
+  if (job.croppedPath && existsSync(job.croppedPath)) {
+    job.localPath = job.croppedPath;
+    job.branded = false;
+  }
+
+  const logoDest = dest === "f1rd" ? "f1rd" : "fvdigital";
+  await brandLocalVideo(job, {
+    headline: job.headline,
+    dest: logoDest,
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  session.pendingLocalJob = job;
+  session.pendingSocialVideo = {
+    kind: "local",
+    step: "preview",
+    sourceUrl: job.sourceUrl,
+    platform: "local",
+    title: job.title,
+    headline: job.headline,
+    bytes: job.bytes,
+  };
+
+  const mb = (job.bytes / 1024 / 1024).toFixed(1);
+  const caption = [
+    `📁 /local listo · ${mb} MB`,
+    `Logo: ${logoDest === "f1rd" ? "F1RD" : "FV Digital"}`,
+    job.translated
+      ? `Audio: ${job.language || "otro"} → ES`
+      : "Audio: español",
+    `Titular: «${job.headline}»`,
+    "También publicaré noticia WP (frame del video) + gráfico a redes.",
+    "Revisa el video. Si está bien, toca Publicar.",
+  ].join("\n");
+
+  if (job.frameBuffer) {
+    try {
+      await ctx.replyWithPhoto(Input.fromBuffer(job.frameBuffer, "frame.jpg"), {
+        caption: "🖼️ Frame para WordPress / redes",
+      });
+    } catch (err) {
+      console.warn("local frame preview:", err.message);
+    }
+  }
+
+  try {
+    await ctx.replyWithVideo(Input.fromLocalFile(job.localPath), {
+      caption,
+      supports_streaming: true,
+      ...localPreviewKeyboard(),
+    });
+  } catch (err) {
+    await reply(
+      ctx,
+      `${caption}\n\n⚠️ No pude adjuntar el preview (${err.message}). Aún puedes publicar o cancelar.`,
+      { voice: false, ...localPreviewKeyboard() }
+    );
+  }
+}
+
+async function publishLocalAfterDest(ctx) {
+  const session = getSession(ctx.chat.id);
+  const dest = session.publishDest || "fvdigital";
+  const job = session.pendingLocalJob;
+  if (!job?.localPath) {
+    throw new Error("No hay video /local pendiente. Usa /local y envía el archivo.");
+  }
+  if (!config.r2?.enabled) {
+    throw new Error("R2 no está configurado. Revisa R2_* en .env.");
+  }
+  assertDestWebhooksReady(dest);
+
+  if (
+    !job.branded ||
+    (dest === "f1rd" && job.dest !== "f1rd") ||
+    (dest !== "f1rd" && job.dest === "f1rd")
+  ) {
+    if (job.croppedPath && existsSync(job.croppedPath)) {
+      job.localPath = job.croppedPath;
+      job.branded = false;
+    }
+    await brandLocalVideo(job, {
+      headline: job.headline,
+      dest: dest === "f1rd" ? "f1rd" : "fvdigital",
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+  }
+
+  await reply(ctx, "📦 Subiendo a R2…", { voice: false });
+  const { readFile } = await import("node:fs/promises");
+  const buffer = job.buffer || (await readFile(job.localPath));
+  const key = buildLocalR2Key(".mp4");
+  const videoUrl = await uploadToR2(buffer, key, "video/mp4");
+  if (!isPublicR2Url(videoUrl)) {
+    throw new Error(
+      "La URL generada no es la pública de R2. Revisa R2_PUBLIC_BASE_URL."
+    );
+  }
+
+  await reply(ctx, "✍️ Generando caption y noticia desde la transcripción…", {
+    voice: false,
+  });
+  const hashtag =
+    dest === "f1rd"
+      ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+      : config.publishWebhook?.hashtag || "#fvdigital";
+  const captionSeed =
+    job.transcriptEs || job.transcript || job.headline || job.title;
+  const rawCaption = await generateSocialCaption(
+    job.headline || job.title,
+    captionSeed,
+    { hashtag, stickToSource: true }
+  ).catch(() => job.headline || job.title);
+  const caption = ensureCaptionHashtag(rawCaption, dest);
+
+  let bodyHtml = "";
+  let newsTitle = job.headline || job.title;
+  try {
+    const formatted = await formatNewsBodyHtml({
+      text: captionSeed,
+      title: newsTitle,
+      topic: "video local",
+    });
+    bodyHtml = finalizeNewsHtml(coerceArticleHtml(formatted.content_html), {
+      skipSource: true,
+    });
+    newsTitle = formatted.title || newsTitle;
+  } catch (err) {
+    console.warn("local news body:", err.message);
+    const paras = String(captionSeed)
+      .split(/(?<=[.!?])\s+/)
+      .filter(Boolean)
+      .slice(0, 6)
+      .map((p) => `<p>${p.replace(/</g, "&lt;")}</p>`)
+      .join("\n");
+    bodyHtml = finalizeNewsHtml(paras || `<p>${newsTitle}</p>`, {
+      skipSource: true,
+    });
+  }
+
+  const frameBuffer = job.frameBuffer || null;
+  await archiveProcessedVideoSafe({
+    buffer,
+    caption,
+    url: videoUrl,
+    nameHint: key.match(/(\d{8}-\d{6})/)?.[1] || "",
+  });
+  await discardLocalJob(job);
+  session.pendingLocalJob = null;
+
+  const pending = {
+    kind: "local",
+    videoUrl,
+    r2Key: key,
+    title: newsTitle,
+    caption,
+    sourceUrl: job.sourceUrl,
+    platform: "local",
+    bytes: buffer.length,
+    step: "confirm",
+    dest,
+    frameBuffer,
+    body_html: bodyHtml,
+    excerpt: String(captionSeed).slice(0, 280),
+    publishNews: true,
   };
   session.pendingSocialVideo = pending;
   session.lastVideo = {
@@ -1421,46 +2797,7 @@ async function processTradVideoUrl(ctx, sourceUrl) {
     sourceUrl: inspected.sourceUrl,
   };
 
-  // Un solo camino disponible → no preguntar
-  if (inspected.hasTranscript && !inspected.hasCaption) {
-    await reply(ctx, "Solo hay audio usable → traduzco el audio…", {
-      voice: false,
-    });
-    const job = await continueTradJob(inspected, {
-      mode: "translate_audio",
-      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
-    });
-    session.pendingTradJob = job;
-    session.pendingSocialVideo = {
-      kind: "trad",
-      step: "ask_headline",
-      sourceUrl: job.sourceUrl,
-      headline: job.headline,
-    };
-    await askTradHeadlineConfirm(ctx, job);
-    return;
-  }
-  if (inspected.hasCaption && !inspected.hasTranscript) {
-    await reply(
-      ctx,
-      "Solo hay caption → lo traduzco a español y creo el audio…",
-      { voice: false }
-    );
-    const job = await continueTradJob(inspected, {
-      mode: "from_caption",
-      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
-    });
-    session.pendingTradJob = job;
-    session.pendingSocialVideo = {
-      kind: "trad",
-      step: "ask_headline",
-      sourceUrl: job.sourceUrl,
-      headline: job.headline,
-    };
-    await askTradHeadlineConfirm(ctx, job);
-    return;
-  }
-
+  // Siempre preguntar: audio / caption / pegar texto
   await askTradSourceMode(ctx, inspected);
 }
 
@@ -1477,19 +2814,24 @@ async function sendPendingSocialVideoToWebhook(ctx) {
     );
   }
 
-  const dest = session.publishDest || "fvdigital";
+  const dest = pending.dest || session.publishDest || "fvdigital";
+  session.publishDest = dest;
   // Fuerza hashtag correcto antes de enviar (F1RD = #Formula1RD para n8n).
   // Videos: caption en el idioma original (NO se fuerza inglés).
   const caption =
     dest === "both"
       ? ensureCaptionHashtag(pending.caption, "both")
       : captionForTarget(pending.caption, dest === "f1rd" ? "f1rd" : "fvdigital");
+  const mediaType =
+    pending.mediaType === "IMAGE" || pending.kind === "termometro"
+      ? "IMAGE"
+      : "VIDEO";
   const results = await publishToDestinations(dest, {
     caption,
     title: pending.title || caption,
     videoUrl: pending.videoUrl,
     r2Key: pending.r2Key || null,
-    mediaType: "VIDEO",
+    mediaType,
   });
 
   session.pendingSocialVideo = null;
@@ -1500,16 +2842,388 @@ async function sendPendingSocialVideoToWebhook(ctx) {
     throw new Error(failed[0]?.error || `HTTP ${failed[0]?.status}`);
   }
   const queued = ok.some((r) => r.queued);
+  const sieNote = pending.sieName ? `\nSIE: ${pending.sieName}` : "";
   const note = queued
     ? `Video (R2) encolado en n8n (${destLabel(dest)}).`
     : `Video enviado a ${destLabel(dest)}.`;
-  await ctx.reply(`${note}\n\n${pending.videoUrl}\n\n${sentCaption}`, {
+  await ctx.reply(`${note}${sieNote}\n\n${pending.videoUrl}\n\n${sentCaption}`, {
     disable_web_page_preview: true,
   });
   if (failed.length) {
     await ctx.reply(
       `Falló: ${failed.map((f) => f.target).join(", ")} — ${failed[0].error || failed[0].status}`
     );
+  }
+
+  // Cualquier VIDEO a redes (FV) → también noticia WP (titular + 1280×720 + fv/tweet2/tema)
+  const wantNews =
+    pending.publishNews !== false &&
+    mediaType === "VIDEO" &&
+    destIncludesFv(dest) &&
+    pending.kind !== "termometro";
+  if (wantNews) {
+    try {
+      await publishLocalNewsBundle(ctx, {
+        title: pending.newsTitle || pending.headline || pending.title,
+        bodyHtml: pending.body_html,
+        excerpt: pending.excerpt || pending.caption,
+        frameBuffer: pending.frameBuffer,
+        dest,
+        sourceLabel: `${pending.kind || "video"}-news`,
+        skipSocialCard: true,
+        videoUrl: pending.videoUrl || "",
+      });
+    } catch (err) {
+      console.error("noticia tras video:", err);
+      await ctx.reply(`⚠️ Video ok, pero falló la noticia WP: ${err.message}`);
+    }
+  }
+
+  session.publishDest = "fvdigital";
+}
+
+/** Noticia WordPress a partir del frame + texto del video. */
+async function publishLocalNewsBundle(
+  ctx,
+  {
+    title,
+    bodyHtml,
+    excerpt = "",
+    frameBuffer = null,
+    dest = "fvdigital",
+    extraCategorySlugs = [],
+    sourceLabel = "local-news",
+    skipSocialCard = false,
+    videoUrl = "",
+  } = {}
+) {
+  const spanishTitle = String(title || "").trim() || "Video";
+  let html = withNewsVideoPlayer(coerceArticleHtml(bodyHtml || ""), videoUrl);
+  const doWp = destIncludesFv(dest);
+  let featuredMediaId = 0;
+
+  let featuredFrame = frameBuffer;
+  if (featuredFrame) {
+    try {
+      featuredFrame = await toFeatured1280x720(featuredFrame);
+    } catch (err) {
+      console.warn("toFeatured1280x720:", err.message);
+    }
+  }
+
+  if (featuredFrame) {
+    try {
+      await ctx.replyWithPhoto(Input.fromBuffer(featuredFrame, "frame-1280x720.jpg"), {
+        caption: `🖼️ Destacada 1280×720 → «${spanishTitle}»`,
+      });
+    } catch {
+      // ignore preview fail
+    }
+  }
+
+  if (doWp && featuredFrame) {
+    await reply(ctx, "📰 Subiendo destacada 1280×720 a WordPress…", {
+      voice: false,
+    });
+    try {
+      const media = await uploadImageFromBuffer(
+        featuredFrame,
+        `video-frame-1280x720-${Date.now()}.jpg`,
+        "image/jpeg"
+      );
+      featuredMediaId = media.id;
+    } catch (error) {
+      console.warn("video WP frame:", error.message);
+      await reply(ctx, `⚠️ WordPress no recibió el frame: ${error.message}`, {
+        voice: false,
+      });
+    }
+  }
+
+  if (!doWp) {
+    await reply(ctx, "F1RD: no publico en WordPress.", { voice: false });
+    return;
+  }
+
+  await reply(
+    ctx,
+    "📰 Publicando noticia WP (categorías fv + tweet2 + tema)…",
+    { voice: false }
+  );
+  const postStatus = config.autoPublishUrls ? "publish" : config.defaultPostStatus;
+  try {
+    const result = await createPost({
+      title: spanishTitle,
+      text: excerpt || htmlToPlainText(html).slice(0, 280),
+      htmlContent: html,
+      featuredMediaId,
+      extraCategorySlugs,
+      status: postStatus,
+      autoTopic: true,
+    });
+    const verified = await getPost(result.post.id);
+    if (!verified?.id) throw new Error("WordPress no confirmó el post.");
+    const session = getSession(ctx.chat.id);
+    session.lastPostId = verified.id;
+    await reply(
+      ctx,
+      formatTaxonomyNotice({
+        categories: result.categories,
+        tags: result.tags,
+      }),
+      { voice: false }
+    );
+    await replyLong(
+      ctx,
+      formatUploadedPost(verified, {
+        categories: result.categories,
+        tags: result.tags,
+      }),
+      { voice: false }
+    );
+    rememberFeedPublished(
+      dest || "fvdigital",
+      verified.link || result.post?.link,
+      spanishTitle,
+      sourceLabel
+    );
+  } catch (error) {
+    console.error("video WP post:", error);
+    await reply(ctx, `⚠️ WordPress: ${error.message}`, { voice: false });
+    return;
+  }
+
+  if (!skipSocialCard) {
+    await reply(ctx, "📤 Enviando gráfico a redes…", { voice: false });
+    await sendSocialCard(ctx, {
+      title: spanishTitle,
+      imageBuffer: featuredFrame || frameBuffer,
+      bodyText:
+        excerpt ||
+        htmlToPlainText(html).slice(0, 600) ||
+        spanishTitle,
+    });
+  }
+}
+
+/**
+ * Noticia desde video social (IG/YT/FB/X): descarga → STT → frame → WP + tarjeta.
+ */
+async function processVideoNewsUrl(ctx, sourceUrl, extraCategorySlugs = []) {
+  const session = getSession(ctx.chat.id);
+  const dest = session.publishDest || "fvdigital";
+  if (!isSupportedSocialVideoUrl(sourceUrl)) {
+    throw new Error(
+      "URL no soportada. Usa YouTube, Instagram, Facebook, Dailymotion o X."
+    );
+  }
+
+  await reply(ctx, "⏳ Descargando video para armar la noticia…", {
+    voice: false,
+  });
+  const downloaded = await downloadSocialVideo(sourceUrl, {
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  const ext = downloaded.ext || ".mp4";
+  const fileName = `social-news${ext.startsWith(".") ? ext : `.${ext}`}`;
+  await reply(ctx, "📝 Sacando texto del audio y un frame…", { voice: false });
+  const job = await prepareLocalVideoJob(downloaded.buffer, {
+    fileName,
+    titleHint: downloaded.title || "",
+    descriptionHint: downloaded.description || "",
+    onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+  });
+
+  try {
+    job.sourceUrl = downloaded.sourceUrl || sourceUrl;
+    job.platform = downloaded.platform || job.platform;
+
+    const captionSeed =
+      job.transcriptEs || job.transcript || job.headline || job.title;
+    let newsTitle = job.headline || job.title || downloaded.title || "Video";
+    let bodyHtml = "";
+    try {
+      const formatted = await formatNewsBodyHtml({
+        text: captionSeed,
+        title: newsTitle,
+        topic: "noticia en video",
+      });
+      bodyHtml = finalizeNewsHtml(coerceArticleHtml(formatted.content_html), {
+        skipSource: true,
+      });
+      newsTitle = formatted.title || newsTitle;
+    } catch (err) {
+      console.warn("video news body:", err.message);
+      const paras = String(captionSeed)
+        .split(/(?<=[.!?])\s+/)
+        .filter(Boolean)
+        .slice(0, 8)
+        .map((p) => `<p>${p.replace(/</g, "&lt;")}</p>`)
+        .join("\n");
+      bodyHtml = finalizeNewsHtml(paras || `<p>${newsTitle}</p>`, {
+        skipSource: true,
+      });
+    }
+
+    if (!job.frameBuffer) {
+      await reply(
+        ctx,
+        "⚠️ No pude capturar frame; la noticia irá sin imagen destacada.",
+        { voice: false }
+      );
+    }
+
+    let playerUrl = downloaded.sourceUrl || sourceUrl || "";
+    if (config.r2?.enabled && downloaded.buffer?.length > 1000) {
+      try {
+        await reply(ctx, "📦 Subiendo video a R2 para el player de la noticia…", {
+          voice: false,
+        });
+        const key = buildSocialVideoR2Key(downloaded.ext || ".mp4");
+        const uploaded = await uploadToR2(
+          downloaded.buffer,
+          key,
+          "video/mp4"
+        );
+        if (isPublicR2Url(uploaded)) playerUrl = uploaded;
+      } catch (err) {
+        console.warn("video-news R2:", err.message);
+      }
+    }
+
+    await publishLocalNewsBundle(ctx, {
+      title: newsTitle,
+      bodyHtml,
+      excerpt: String(captionSeed).slice(0, 280),
+      frameBuffer: job.frameBuffer,
+      dest,
+      extraCategorySlugs,
+      sourceLabel: "video-news",
+      videoUrl: playerUrl,
+    });
+  } finally {
+    await discardLocalJob(job).catch(() => {});
+  }
+}
+
+/** Si el destino incluye FV y hay bumpers SIE, pregunta antes de enviar. */
+async function maybeAskSieThenSend(ctx) {
+  const session = getSession(ctx.chat.id);
+  const pending = session.pendingSocialVideo;
+  if (!pending?.videoUrl) {
+    throw new Error("No hay video pendiente de envío.");
+  }
+  // Congela el destino del pendiente (no heredar un F1RD viejo/nuevo a medias).
+  const dest = pending.dest || session.publishDest || "fvdigital";
+  pending.dest = dest;
+  session.publishDest = dest;
+  session.pendingSocialVideo = pending;
+
+  if (pending.kind === "termometro" || pending.mediaType === "IMAGE") {
+    await reply(ctx, "ℹ️ Imagen (no video) → envío sin bumper SIE.", {
+      voice: false,
+    });
+    await sendPendingSocialVideoToWebhook(ctx);
+    return;
+  }
+
+  if (!destIncludesFv(dest)) {
+    await reply(
+      ctx,
+      `ℹ️ Destino ${destLabel(dest)} (sin FV) → envío sin bumper SIE.`,
+      { voice: false }
+    );
+    await sendPendingSocialVideoToWebhook(ctx);
+    return;
+  }
+
+  if (!sieBumperAvailable()) {
+    await reply(
+      ctx,
+      "⚠️ SIE no disponible (carpeta vacía o desactivado). Envío sin bumper.",
+      { voice: false }
+    );
+    await sendPendingSocialVideoToWebhook(ctx);
+    return;
+  }
+
+  let pick;
+  try {
+    pick = pickNextSieVideo();
+  } catch (err) {
+    await reply(ctx, `⚠️ SIE no disponible (${err.message}). Envío sin bumper.`, {
+      voice: false,
+    });
+    await sendPendingSocialVideoToWebhook(ctx);
+    return;
+  }
+
+  pending.step = "ask_sie";
+  pending.siePick = { path: pick.path, name: pick.name };
+  session.pendingSocialVideo = pending;
+
+  const left = pick.remainingAfter;
+  console.log(
+    `[SIE] ask chat=${ctx.chat?.id} dest=${dest} next=${pick.name} left=${left}`
+  );
+  await ctx.reply(
+    [
+      "🎬 ¿Concateno un video SIE al final?",
+      "",
+      `Siguiente: ${pick.name}`,
+      left > 0
+        ? `Quedan ${left} sin usar en este ciclo (luego se reinicia).`
+        : "Es el último del ciclo; el próximo reinicia la lista.",
+      "",
+      "Destino: " + destLabel(dest),
+    ].join("\n"),
+    { ...sieConcatKeyboard(), disable_web_page_preview: true }
+  );
+}
+
+async function applySieConcatAndSend(ctx) {
+  const session = getSession(ctx.chat.id);
+  const pending = session.pendingSocialVideo;
+  if (!pending?.videoUrl) {
+    throw new Error("No hay video pendiente de envío.");
+  }
+  const pick = pending.siePick || pickNextSieVideo();
+  await reply(ctx, `🔗 Concatenando SIE: ${pick.name}…`, { voice: false });
+
+  let result;
+  try {
+    result = await concatVideoWithSie({
+      mainUrl: pending.videoUrl,
+      siePath: pick.path,
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
+    const key = buildSocialVideoR2Key(".mp4").replace(
+      "videos/fv-",
+      "videos/fv-sie-"
+    );
+    await reply(ctx, "📦 Subiendo video+SIE a R2…", { voice: false });
+    const videoUrl = await uploadToR2(result.buffer, key, "video/mp4");
+    if (!isPublicR2Url(videoUrl)) {
+      throw new Error("La URL R2 del video+SIE no es pública.");
+    }
+    await archiveProcessedVideoSafe({
+      buffer: result.buffer,
+      caption: pending.caption || pick.name,
+      url: videoUrl,
+      nameHint: key.match(/(\d{8}-\d{6})/)?.[1] || "",
+    });
+    markSieUsed(pick.name);
+    pending.videoUrl = videoUrl;
+    pending.r2Key = key;
+    pending.bytes = result.bytes;
+    pending.sieName = pick.name;
+    pending.siePick = null;
+    pending.step = "confirm";
+    session.pendingSocialVideo = pending;
+    await sendPendingSocialVideoToWebhook(ctx);
+  } finally {
+    await discardSieWork(result);
   }
 }
 
@@ -1888,6 +3602,7 @@ async function dispatchCommandIntent(ctx, intent) {
         if (session.writeFlow) cancelWriteFlow(session);
         if (session.hyperFlow) cancelHyperFlow(session);
         if (session.termometroFlow) session.termometroFlow = null;
+        if (session.encuestaFlow) cancelEncuestaFlow(session);
         if (session.pendingSocialVideo) session.pendingSocialVideo = null;
         if (session.pendingTradJob) {
           await discardTradJob(session.pendingTradJob);
@@ -1899,21 +3614,24 @@ async function dispatchCommandIntent(ctx, intent) {
       }
 
       case "write_news":
-        await startWriteFlow(
-          ctx,
-          intent.topic ? `/escribir ${intent.topic}` : "/escribir"
-        );
+        await askPublishDest(ctx, {
+          resume: "escribir",
+          text: intent.topic ? `/escribir ${intent.topic}` : "/escribir",
+        });
         return true;
 
       case "wp":
-        await startWpFlow(ctx, intent.topic ? `/wp ${intent.topic}` : "/wp");
+        await askPublishDest(ctx, {
+          resume: "wp",
+          text: intent.topic ? `/wp ${intent.topic}` : "/wp",
+        });
         return true;
 
       case "periodista":
-        await startPeriodistaFlow(
-          ctx,
-          intent.title ? `/periodista ${intent.title}` : "/periodista"
-        );
+        await askPublishDest(ctx, {
+          resume: "periodista",
+          text: intent.title ? `/periodista ${intent.title}` : "/periodista",
+        });
         return true;
 
       case "termometro": {
@@ -1970,20 +3688,23 @@ async function dispatchCommandIntent(ctx, intent) {
         );
         return true;
 
-      case "noticia_ocr":
-        session.photoIntent = "noticia";
+      case "dub":
+        session.pendingSocialVideo = { kind: "dub", step: "await_url" };
         await reply(
           ctx,
-          "📸 Modo noticia/OCR: envía la captura de pantalla de la noticia."
+          "🎧 /dub por voz: envía ahora el enlace del video a doblar con ElevenLabs."
         );
         return true;
 
+      case "noticia_ocr":
+        await askPublishDest(ctx, { resume: "noticia" });
+        return true;
+
       case "nota":
-        session.photoIntent = "nota";
-        await reply(
-          ctx,
-          "📄 Modo nota: envía el PDF o la foto del documento."
-        );
+        await askPublishDest(ctx, {
+          resume: "nota",
+          text: intent.raw.replace(/^\/nota\s*/i, "").trim(),
+        });
         return true;
 
       case "recortar":
@@ -2040,16 +3761,13 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
         ? article.bodyText
         : cleanImportedText(article.bodyText);
 
-      // En redes el "título" es el propio texto del post; generamos un
-      // titular periodístico real a partir del contenido.
-      let headlineForFormat = article.title;
-      if (platform) {
-        await status(ctx, "2/4 🧠 Redactando titular a partir del contenido...");
-        headlineForFormat = await generateNewsHeadline(cleanBody, {
-          platform: platformLabel,
-          fallbackTitle: article.title,
-        }).catch(() => article.title);
-      }
+      // Siempre analizar el titular (reglas ≤12 palabras); en webs también,
+      // para no dejar leads de medio (AGENDA56, datelines, etc.).
+      await status(ctx, "2/4 🧠 Analizando y redactando titular...");
+      const headlineForFormat = await generateNewsHeadline(cleanBody, {
+        platform: platformLabel || "",
+        fallbackTitle: article.title,
+      }).catch(() => article.title);
 
       const titlePreview =
         headlineForFormat.length > 90
@@ -2158,6 +3876,12 @@ async function handleNewsFromUrl(ctx, url, extraCategorySlugs = []) {
           ctx,
           formatUploadedPost(verified, { categories: result.categories, tags: result.tags }),
           { voice: false }
+        );
+        rememberFeedPublished(
+          session.publishDest || "fvdigital",
+          verified.link || result.post?.link,
+          spanishTitle,
+          "news-url"
         );
       } catch (error) {
         wpError = error;
@@ -2347,6 +4071,12 @@ async function remindWriteStep(ctx, wf) {
     await ctx.reply("Siguiente paso: responde 1, 2, 3 o escribe tu titular.");
   } else if (wf.step === "topic") {
     await ctx.reply("Siguiente paso: envía el tema a desarrollar.");
+  } else if (wf.step === "preview") {
+    await ctx.reply(
+      "Siguiente paso: Continuar, Reescribir, Opinión o Cancelar."
+    );
+  } else if (wf.step === "preview_feedback") {
+    await ctx.reply(askRewriteOpinionText());
   } else if (wf.step === "photo") {
     await ctx.reply(
       "Siguiente paso: envía foto, escribe *buscar*, *captura* (si aplica) o *sin foto*."
@@ -2482,40 +4212,52 @@ async function startWriteFlow(ctx, text) {
   await ctx.reply("¿Sobre qué tema es la noticia?");
 }
 
-async function generateWpDraft(ctx, session) {
+async function generateWpDraft(ctx, session, { rewriteNotes = "" } = {}) {
   const wf = session.writeFlow;
+  const notes = String(rewriteNotes || wf.rewriteNotes || "").trim();
   wf.step = "generating";
 
   try {
-    wf.research = await Promise.race([
-      researchWithStatus(ctx, wf.topic),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Búsqueda web tardó demasiado")), 60000)
-      ),
-    ]).catch((error) => {
-      console.warn("researchTopic wp:", error.message);
-      return { researchText: "", similarNews: [], articleBodies: [], imageUrl: null };
-    });
+    if (!wf.research) {
+      wf.research = await Promise.race([
+        researchWithStatus(ctx, wf.topic),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Búsqueda web tardó demasiado")), 60000)
+        ),
+      ]).catch((error) => {
+        console.warn("researchTopic wp:", error.message);
+        return { researchText: "", similarNews: [], articleBodies: [], imageUrl: null };
+      });
+    }
 
     if (wf.research.imageUrl && !wf.imageUrl) {
       wf.imageUrl = wf.research.imageUrl;
     }
 
-    await status(ctx, "✍️ Redactando titular y contenido...");
-    const titles = await suggestNewsTitles(wf.topic, wf.research.researchText || "");
-    wf.titles = titles;
-    wf.selectedTitle = titles[0] || wf.topic;
+    await status(
+      ctx,
+      notes ? "✍️ Reescribiendo con tu opinión..." : "✍️ Redactando titular y contenido..."
+    );
+
+    // Si ya hay titular (reescribir / opinión), no inventar otro.
+    if (!wf.selectedTitle) {
+      const titles = await suggestNewsTitles(wf.topic, wf.research.researchText || "");
+      wf.titles = titles;
+      wf.selectedTitle = titles[0] || wf.topic;
+    }
 
     const draft = await writeOriginalNews({
       topic: wf.topic,
       title: wf.selectedTitle,
       researchText: wf.research.researchText || "",
+      rewriteNotes: notes,
     });
 
     wf.body_html = finalizeNewsHtml(coerceArticleHtml(draft.body_html), {
       skipSource: true,
     });
     wf.excerpt = draft.excerpt || "";
+    wf.rewriteNotes = "";
     wf.step = "preview";
 
     await showWpPreview(ctx, session);
@@ -2534,9 +4276,11 @@ async function showWpPreview(ctx, session) {
       title: wf.selectedTitle,
       excerpt: wf.excerpt,
       bodyPlain: htmlToPlainText(wf.body_html),
+      lockTitle: false,
     }),
     { voice: false }
   );
+  await ctx.reply("Elige una opción:", articlePreviewKeyboard());
 }
 
 async function startWpFlow(ctx, text) {
@@ -2653,8 +4397,9 @@ async function startPeriodistaFlow(ctx, text = "") {
   }
 }
 
-async function generatePeriodistaDraft(ctx, session) {
+async function generatePeriodistaDraft(ctx, session, { rewriteNotes = "" } = {}) {
   const wf = session.writeFlow;
+  const notes = String(rewriteNotes || wf.rewriteNotes || "").trim();
   wf.step = "generating";
   const lockedTitle = String(wf.selectedTitle || wf.originalTitle || "").trim();
   if (!lockedTitle) {
@@ -2664,25 +4409,33 @@ async function generatePeriodistaDraft(ctx, session) {
   }
 
   try {
-    wf.research = await Promise.race([
-      researchWithStatus(ctx, wf.topic || lockedTitle),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Búsqueda web tardó demasiado")), 60000)
-      ),
-    ]).catch((error) => {
-      console.warn("researchTopic periodista:", error.message);
-      return { researchText: "", similarNews: [], articleBodies: [], imageUrl: null };
-    });
+    if (!wf.research) {
+      wf.research = await Promise.race([
+        researchWithStatus(ctx, wf.topic || lockedTitle),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Búsqueda web tardó demasiado")), 60000)
+        ),
+      ]).catch((error) => {
+        console.warn("researchTopic periodista:", error.message);
+        return { researchText: "", similarNews: [], articleBodies: [], imageUrl: null };
+      });
+    }
 
     if (wf.research.imageUrl && !wf.imageUrl) {
       wf.imageUrl = wf.research.imageUrl;
     }
 
-    await status(ctx, "✍️ Desarrollando el tema (titular bloqueado)...");
+    await status(
+      ctx,
+      notes
+        ? "✍️ Reescribiendo con tu opinión (titular intacto)..."
+        : "✍️ Desarrollando el tema (titular bloqueado)..."
+    );
     const draft = await writeOriginalNews({
       topic: wf.topic || lockedTitle,
       title: lockedTitle,
       researchText: wf.research.researchText || "",
+      rewriteNotes: notes,
     });
 
     wf.selectedTitle = lockedTitle;
@@ -2690,28 +4443,44 @@ async function generatePeriodistaDraft(ctx, session) {
       skipSource: true,
     });
     wf.excerpt = draft.excerpt || "";
+    wf.rewriteNotes = "";
     wf.step = "preview";
 
     await reply(
       ctx,
-      [
-        `Titular (intacto): ${lockedTitle}`,
-        wf.excerpt ? `\n${wf.excerpt}` : "",
-        "",
-        htmlToPlainText(wf.body_html).slice(0, 900),
-        htmlToPlainText(wf.body_html).length > 900 ? "…" : "",
-        "",
-        "Responde *sí* para pasar a la foto, o *cancelar*.",
-      ]
-        .filter(Boolean)
-        .join("\n"),
+      formatPeriodistaPreview({
+        title: lockedTitle,
+        excerpt: wf.excerpt,
+        bodyPlain: htmlToPlainText(wf.body_html),
+      }),
       { voice: false }
     );
+    await ctx.reply("Elige una opción:", articlePreviewKeyboard());
   } catch (error) {
     console.error("generatePeriodistaDraft:", error);
     wf.step = "topic";
     await ctx.reply(`❌ Error al redactar: ${error.message}`, { voice: false });
   }
+}
+
+async function askArticleOpinion(ctx, session) {
+  const wf = session.writeFlow;
+  wf.step = "preview_feedback";
+  await ctx.reply(askRewriteOpinionText(), { voice: false });
+}
+
+async function rewriteArticleFromPreview(ctx, session, notes = "") {
+  const wf = session.writeFlow;
+  wf.rewriteNotes = String(notes || "").trim();
+  if (wf.source === "periodista") {
+    await generatePeriodistaDraft(ctx, session, { rewriteNotes: wf.rewriteNotes });
+    return;
+  }
+  if (wf.source === "wp") {
+    await generateWpDraft(ctx, session, { rewriteNotes: wf.rewriteNotes });
+    return;
+  }
+  await ctx.reply("Este flujo no admite reescritura aquí.", { voice: false });
 }
 
 async function previewFeaturedImage(ctx, { buffer, url, caption, wf = null }) {
@@ -2881,6 +4650,9 @@ async function publishWrittenNews(ctx) {
 
       let featuredMediaId = 0;
       const dest = session.publishDest || "fvdigital";
+      if (!session.publishDest) {
+        console.warn("publishWrittenNews: publishDest vacío; usando fvdigital");
+      }
       const doWp = destIncludesFv(dest);
 
       if (doWp && wf.imageBuffer) {
@@ -2981,6 +4753,12 @@ async function publishWrittenNews(ctx) {
           formatUploadedPost(verified, { categories: result.categories, tags: result.tags }),
           { voice: false }
         );
+        rememberFeedPublished(
+          session.publishDest || "fvdigital",
+          verified.link || result.post?.link,
+          spanishTitle,
+          "write-news"
+        );
       } catch (error) {
         wpError = error;
         console.error("publishWrittenNews WP:", error);
@@ -3011,6 +4789,8 @@ async function publishWrittenNews(ctx) {
         imageUrl: cardImageUrl,
         bodyText: captionSource,
       });
+      // No heredar destino a la siguiente publicación
+      session.publishDest = "fvdigital";
     });
   } catch (error) {
     console.error("publishWrittenNews:", error);
@@ -3177,14 +4957,35 @@ async function handleWriteFlowMessage(ctx, text) {
       return;
     }
 
+    if (wf.step === "preview_feedback") {
+      const notes = text.trim();
+      if (notes.length < 8) {
+        await ctx.reply(
+          "Cuéntame un poco más qué cambiar (mín. unas palabras), o /cancelar.",
+          { voice: false }
+        );
+        return;
+      }
+      await rewriteArticleFromPreview(ctx, session, notes);
+      return;
+    }
+
     if (wf.step === "preview") {
       if (isWpPreviewConfirm(text)) {
         await askFeaturedImage(ctx, session);
         return;
       }
+      if (isWpPreviewRewrite(text)) {
+        await rewriteArticleFromPreview(ctx, session, "");
+        return;
+      }
+      if (isWpPreviewOpinion(text)) {
+        await askArticleOpinion(ctx, session);
+        return;
+      }
       if (wf.source === "periodista") {
         await ctx.reply(
-          "El titular ya está fijado. Responde *sí* para la foto, o *cancelar*.",
+          "Usa los botones o escribe *sí*, *reescribir*, *opinión* o *cancelar*.",
           { voice: false }
         );
         return;
@@ -3199,14 +5000,15 @@ async function handleWriteFlowMessage(ctx, text) {
           researchText: wf.research?.researchText || "",
         });
         wf.body_html = finalizeNewsHtml(coerceArticleHtml(draft.body_html), {
-      skipSource: true,
-    });
+          skipSource: true,
+        });
         wf.excerpt = draft.excerpt || "";
+        wf.step = "preview";
         await showWpPreview(ctx, session);
         return;
       }
       await ctx.reply(
-        "Responde *sí* para continuar con la foto, escribe un titular nuevo, o *cancelar*.",
+        "Usa los botones o escribe *sí*, *reescribir*, *opinión*, un titular nuevo, o *cancelar*.",
         { voice: false }
       );
       return;
@@ -3468,6 +5270,13 @@ async function flushBuffer(chatId, ctx) {
         { voice: false }
       );
 
+      rememberFeedPublished(
+        session.publishDest || "fvdigital",
+        result.post?.link,
+        result.post.title?.rendered || title || text.slice(0, 90),
+        "telegram-flush"
+      );
+
       await sendSocialCard(ctx, {
         title: result.post.title?.rendered || title || text.slice(0, 90),
         imageBuffer: cardBgBuffer,
@@ -3513,11 +5322,13 @@ async function handleChatText(ctx, text, { showThinking = false } = {}) {
 async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
   const session = getSession(ctx.chat.id);
   session.fromVoice = !transcribeOnly;
-  await ctx.reply("🎧 Escuchando tu audio (Groq)…", { voice: false });
+  await ctx.reply("🎧 Escuchando tu audio…", { voice: false });
 
   try {
     const { buffer, ext } = await downloadTelegramFile(ctx, fileId);
-    const text = await transcribeAudio(buffer, ext);
+    const text = await transcribeAudio(buffer, ext, {
+      onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+    });
 
     if (!text) {
       await reply(ctx, "No pude entender el audio.");
@@ -3565,12 +5376,23 @@ async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
       }
     }
 
+    if (isEncuestaFlowActive(session)) {
+      if (await handleEncuestaFlowText(ctx, trimmed)) return;
+    }
+
     if (isPicFlowActive(session)) {
       if (await handlePicFlowText(ctx, trimmed)) return;
     }
 
     if (session.pendingSocialVideo?.step === "await_url") {
-      const kind = session.pendingSocialVideo.kind === "trad" ? "trad" : "video";
+      const kind =
+        session.pendingSocialVideo.kind === "trad"
+          ? "trad"
+          : session.pendingSocialVideo.kind === "dub"
+            ? "dub"
+            : session.pendingSocialVideo.kind === "ndigital"
+              ? "ndigital"
+              : "video";
       if (kind === "trad" && trimmed.length >= 8 && !extractFirstUrl(trimmed)) {
         session.pendingSocialVideo = null;
         const draft = startTradTextFlow(ctx, trimmed);
@@ -3581,7 +5403,11 @@ async function handleAudioInput(ctx, fileId, { transcribeOnly = false } = {}) {
         ctx,
         kind === "trad"
           ? "Envía un enlace de video o un texto más largo para /trad."
-          : "Envía un enlace válido de video."
+          : kind === "dub"
+            ? "Envía un enlace válido de video para /dub."
+            : kind === "ndigital"
+              ? "Envía un enlace válido de video para /ndigital."
+              : "Envía un enlace válido de video."
       );
       return;
     }
@@ -3622,6 +5448,16 @@ async function handlePhoto(ctx) {
 
     if (termometroAwaitingPhoto(session)) {
       await handleTermometroPhoto(ctx, imageBuffer, mimeType);
+      return;
+    }
+
+    if (
+      isEncuestaFlowActive(session) &&
+      (encuestaAwaitingPhoto(session) ||
+        session.encuestaFlow?.step === "awaiting_photos" ||
+        /^\/encuesta(?:doble)?\b/i.test(caption))
+    ) {
+      await handleEncuestaPhoto(ctx, imageBuffer, mimeType, caption);
       return;
     }
 
@@ -4006,6 +5842,94 @@ export async function startBot() {
     }
   });
 
+  bot.command("dub", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const arg = (ctx.message.text || "")
+      .replace(/^\/dub(@\w+)?\s*/i, "")
+      .trim();
+    const url = extractFirstUrl(arg) || extractUrlFromMessage(ctx);
+    try {
+      if (url) {
+        if (await maybeAskPublishDest(ctx, url, [], "dub")) return;
+        await processDubVideoUrl(ctx, url);
+        return;
+      }
+      const session = getSession(ctx.chat.id);
+      session.pendingSocialVideo = { step: "await_url", kind: "dub" };
+      await reply(
+        ctx,
+        [
+          "🎧 /dub — doblaje ElevenLabs (clonación de voz + traducción).",
+          "",
+          "Envía el enlace del video (YouTube, Instagram, Facebook, Dailymotion o X).",
+          "Siempre dobla a español (es). Requiere ELEVENLABS_API_KEY.",
+          "Luego: titular Sí/No → R2 → webhook.",
+        ].join("\n"),
+        { voice: false }
+      );
+    } catch (error) {
+      console.error("/dub:", error);
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.command("ndigital", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const arg = (ctx.message.text || "")
+      .replace(/^\/ndigital(@\w+)?\s*/i, "")
+      .trim();
+    const url = extractFirstUrl(arg) || extractUrlFromMessage(ctx);
+    try {
+      if (url) {
+        await processNdigitalVideoUrl(ctx, url);
+        return;
+      }
+      const session = getSession(ctx.chat.id);
+      session.pendingSocialVideo = { step: "await_url", kind: "ndigital" };
+      await reply(
+        ctx,
+        [
+          "📺 /ndigital — limpia reels N Digital",
+          "",
+          "Envía el enlace del reel (Instagram, YouTube, etc.).",
+          `Recorte: ${config.ndigital.cropTop}px arriba · ${config.ndigital.cropBottom}px abajo · −${config.ndigital.trimEndSec}s al final.`,
+          "Te mando el preview antes de publicar.",
+        ].join("\n"),
+        { voice: false }
+      );
+    } catch (error) {
+      console.error("/ndigital:", error);
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.command(["local", "clip"], async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    if (session.pendingLocalJob) {
+      await discardLocalJob(session.pendingLocalJob);
+      session.pendingLocalJob = null;
+    }
+    session.pendingSocialVideo = { kind: "local", step: "await_file" };
+    await reply(
+      ctx,
+      [
+        "📁 /local — video del equipo",
+        "",
+        "Envía el video como archivo o como video de Telegram (máx. ~18 MB).",
+        "Lo transcribo; si no está en español, lo paso a español.",
+        "Luego: logo arriba + titular rojo abajo + caption.",
+        "También saco un frame → noticia WordPress + gráfico a redes.",
+        "",
+        "Formatos: MP4, MOV, MKV, WEBM (máx. ~18 MB). O /cancelar.",
+      ].join("\n"),
+      { voice: false }
+    );
+  });
+
   bot.command("videostatus", async (ctx) => {
     try {
       await handleVideoStatus(ctx);
@@ -4041,6 +5965,10 @@ export async function startBot() {
     } catch (error) {
       await ctx.reply(`❌ ${error.message}`, { voice: false });
     }
+  });
+
+  bot.command(["feeds", "feed"], async (ctx) => {
+    await reply(ctx, formatGraphicsFeedHelp(), { voice: false });
   });
 
   bot.command("estado", async (ctx) => {
@@ -4196,9 +6124,7 @@ export async function startBot() {
   });
 
   bot.command("auto", async (ctx) => {
-    const session = getSession(ctx.chat.id);
-    session.mode = "auto";
-    await reply(ctx, "Modo AUTO — publicación directa a WordPress.", { voice: false });
+    await askPublishDest(ctx, { resume: "auto" });
   });
 
   bot.command("echo", async (ctx) => {
@@ -4207,8 +6133,7 @@ export async function startBot() {
   });
 
   bot.command("post", async (ctx) => {
-    getSession(ctx.chat.id).mode = "auto";
-    await reply(ctx, "Modo POST activado.");
+    await askPublishDest(ctx, { resume: "auto" });
   });
 
   bot.command("copiar", async (ctx) => {
@@ -4218,24 +6143,32 @@ export async function startBot() {
 
   bot.command("escribir", async (ctx) => {
     const text = ctx.message.text.replace(/^\/escribir\s*/i, "").trim();
-    await startWriteFlow(ctx, text ? `/escribir ${text}` : "/escribir");
+    await askPublishDest(ctx, {
+      resume: "escribir",
+      text: text ? `/escribir ${text}` : "/escribir",
+    });
   });
 
   bot.command("periodista", async (ctx) => {
     try {
-      await startPeriodistaFlow(ctx, ctx.message.text || "");
+      await askPublishDest(ctx, {
+        resume: "periodista",
+        text: ctx.message.text || "/periodista",
+      });
     } catch (error) {
-      console.error("startPeriodistaFlow:", error);
+      console.error("periodista dest:", error);
       await ctx.reply(`❌ Error: ${error.message}`, { voice: false });
     }
   });
 
   bot.command("wp", async (ctx) => {
-    const text = ctx.message.text || "";
     try {
-      await startWpFlow(ctx, text);
+      await askPublishDest(ctx, {
+        resume: "wp",
+        text: ctx.message.text || "/wp",
+      });
     } catch (error) {
-      console.error("startWpFlow:", error);
+      console.error("wp dest:", error);
       await ctx.reply(`❌ Error: ${error.message}`, { voice: false });
     }
   });
@@ -4255,15 +6188,44 @@ export async function startBot() {
       await reply(ctx, "Preparación /trad cancelada.", { voice: false });
       return;
     }
+    if (session.pendingDubJob) {
+      await discardDubJob(session.pendingDubJob);
+      session.pendingDubJob = null;
+      session.pendingSocialVideo = null;
+      await reply(ctx, "Preparación /dub cancelada.", { voice: false });
+      return;
+    }
+    if (session.pendingNdigitalJob) {
+      await discardNdigitalJob(session.pendingNdigitalJob);
+      session.pendingNdigitalJob = null;
+      session.pendingSocialVideo = null;
+      await reply(ctx, "Recorte /ndigital cancelado.", { voice: false });
+      return;
+    }
+    if (session.pendingLocalJob) {
+      await discardLocalJob(session.pendingLocalJob);
+      session.pendingLocalJob = null;
+      session.pendingSocialVideo = null;
+      await reply(ctx, "Preparación /local cancelada.", { voice: false });
+      return;
+    }
     if (session.pendingSocialVideo) {
       session.pendingSocialVideo = null;
-      await reply(ctx, "Envío de /video o /trad cancelado.", { voice: false });
+      await reply(ctx, "Envío de /video, /trad, /dub, /ndigital o /local cancelado.", { voice: false });
       return;
     }
     if (session.pendingDestChoice) {
+      const wasEncuesta =
+        session.pendingDestChoice.resume === "encuesta_manual";
       session.pendingDestChoice = null;
       session.publishDest = "fvdigital";
+      if (wasEncuesta) cancelEncuestaFlow(session);
       await reply(ctx, "Destino cancelado.", { voice: false });
+      return;
+    }
+    if (isEncuestaFlowActive(session)) {
+      cancelEncuestaFlow(session);
+      await reply(ctx, encuestaCancelText(), { voice: false });
       return;
     }
     if (session.pendingLinkChoice) {
@@ -4287,7 +6249,7 @@ export async function startBot() {
       return;
     }
     if (!session.writeFlow) {
-      await reply(ctx, "No hay redacción, enlace, /video, /trad ni modo /hyper en curso.", {
+      await reply(ctx, "No hay redacción, enlace, /video, /trad, /dub, /ndigital ni modo /hyper en curso.", {
         voice: false,
       });
       return;
@@ -4317,32 +6279,12 @@ export async function startBot() {
   });
 
   bot.command(["noticia", "ocr"], async (ctx) => {
-    getSession(ctx.chat.id).photoIntent = "noticia";
-    await reply(
-      ctx,
-      "Envía la captura. Extraeré el texto, redactaré la noticia y luego te pediré la foto destacada (siempre con vista previa antes de publicar).",
-      { voice: false }
-    );
+    await askPublishDest(ctx, { resume: "noticia" });
   });
 
   bot.command("nota", async (ctx) => {
     const hint = ctx.message.text.replace(/^\/nota(?:@\w+)?\s*/i, "").trim();
-    const session = getSession(ctx.chat.id);
-    session.photoIntent = "nota";
-    if (hint) session.buffer.text = hint;
-    await reply(
-      ctx,
-      [
-        "📄 /nota — envía un documento",
-        "",
-        "Acepta: PDF o foto del documento.",
-        "Extraigo la información, redacto la nota y, si el archivo trae imagen, la uso; si no, te pido la foto destacada.",
-        hint ? `\nNota: ${hint}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-      { voice: false }
-    );
+    await askPublishDest(ctx, { resume: "nota", text: hint });
   });
 
   bot.command("voz", async (ctx) => {
@@ -4378,39 +6320,83 @@ export async function startBot() {
     if (unauthorized(ctx)) return;
     rememberChat(ctx);
     const session = getSession(ctx.chat.id);
+    const arg = ctx.message.text.replace(/^\/pic\s*/i, "").trim();
+
+    // Reenvía el último /pic guardado (mismo flujo de gráficos → redes)
+    if (/^(last|último|ultimo|enviar|reenviar)$/i.test(arg)) {
+      const saved = loadLastPic();
+      if (!saved) {
+        await reply(
+          ctx,
+          "No hay un /pic guardado. Genera la vista previa con /pic primero.",
+          { voice: false }
+        );
+        return;
+      }
+      try {
+        await publishPicToSocial(ctx, saved);
+      } catch (error) {
+        console.error("/pic last:", error);
+        await ctx.reply(`❌ /pic last: ${error.message}`);
+      }
+      return;
+    }
+
     session.picFlow = emptyPicFlow();
-    const title = ctx.message.text.replace(/^\/pic\s*/i, "").trim();
-    if (title) session.picFlow.headline = title;
-    await reply(ctx, picIntroText(Boolean(title)), { voice: false });
+    if (arg) session.picFlow.headline = arg;
+    await reply(ctx, picIntroText(Boolean(arg)), { voice: false });
+  });
+
+  bot.command("encuesta", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    if (session.picFlow) cancelPicFlow(session);
+    if (session.termometroFlow) cancelTermometroFlow(session);
+    session.encuestaFlow = emptyEncuestaFlow();
+    const arg = ctx.message.text.replace(/^\/encuesta(?:@\w+)?\s*/i, "").trim();
+    if (arg.length >= 5) {
+      await reply(
+        ctx,
+        "Pregunta guardada. Ahora envía la foto de la encuesta.",
+        { voice: false }
+      );
+      session.encuestaFlow.question = normalizeEncuestaQuestion(arg);
+      session.encuestaFlow.step = "awaiting_photo";
+      return;
+    }
+    await reply(ctx, encuestaIntroText(), { voice: false });
+  });
+
+  bot.command("encuestadoble", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    if (session.picFlow) cancelPicFlow(session);
+    if (session.termometroFlow) cancelTermometroFlow(session);
+    session.encuestaFlow = emptyEncuestaDobleFlow();
+    const arg = ctx.message.text
+      .replace(/^\/encuestadoble(?:@\w+)?\s*/i, "")
+      .trim();
+    const n = parseEncuestaPhotoCount(arg);
+    if ([2, 3, 4].includes(n)) {
+      session.encuestaFlow.photoCount = n;
+      session.encuestaFlow.photos = [];
+      session.encuestaFlow.step = "awaiting_photos";
+      await reply(
+        ctx,
+        `Encuesta de ${n} fotos.\n${encuestaAskNextPhotoText(session.encuestaFlow)}`,
+        { voice: false }
+      );
+      return;
+    }
+    await reply(ctx, encuestaDobleIntroText(), { voice: false });
   });
 
   bot.command("encuestas", async (ctx) => {
     if (unauthorized(ctx)) return;
     rememberChat(ctx);
-    await reply(
-      ctx,
-      "Publicando la siguiente encuesta pendiente (WP + redes FV)…",
-      { voice: false }
-    );
-    try {
-      const { encuestasDailyLimit, runEncuestas } = await import("./encuestas.mjs");
-      const result = await runEncuestas({ limit: encuestasDailyLimit() });
-      const n = result?.published?.length || 0;
-      const skip = result?.skipped?.length || 0;
-      const errs = result?.errors?.length || 0;
-      if (result?.noneNew) {
-        await reply(ctx, "No hay encuestas nuevas por publicar.", { voice: false });
-        return;
-      }
-      await reply(
-        ctx,
-        `Encuestas listas. Publicadas: ${n} | omitidas (sin foto): ${skip} | errores: ${errs}`,
-        { voice: false }
-      );
-    } catch (error) {
-      console.error("/encuestas:", error);
-      await ctx.reply(`❌ Encuestas: ${error.message}`);
-    }
+    await askPublishDest(ctx, { resume: "encuestas" });
   });
 
   bot.command("mas", async (ctx) => {
@@ -4499,6 +6485,36 @@ export async function startBot() {
 
   bot.on("photo", handlePhoto);
 
+  bot.on("video", async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    if (isEchoMode(session)) {
+      await ctx.reply("video");
+      return;
+    }
+    if (session.pendingSocialVideo?.kind !== "local" || session.pendingSocialVideo?.step !== "await_file") {
+      return;
+    }
+    const vid = ctx.message.video;
+    if (!vid?.file_id) {
+      await ctx.reply("No pude leer ese video.");
+      return;
+    }
+    try {
+      if (vid.file_size && vid.file_size > 18 * 1024 * 1024) {
+        await ctx.reply("El video es muy pesado (máx. ~18 MB por límite de Telegram).");
+        return;
+      }
+      await reply(ctx, "⬇️ Descargando video…", { voice: false });
+      const { buffer, ext } = await downloadTelegramFile(ctx, vid.file_id);
+      await processLocalVideoUpload(ctx, buffer, `video.${ext || "mp4"}`);
+    } catch (error) {
+      console.error("video/local:", error);
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
   bot.on("document", async (ctx) => {
     if (unauthorized(ctx)) return;
     rememberChat(ctx);
@@ -4517,6 +6533,37 @@ export async function startBot() {
     const mime = String(doc.mime_type || "").toLowerCase();
     const name = doc.file_name || "documento";
     const caption = ctx.message.caption || session.buffer.text || "";
+
+    const awaitingLocal =
+      session.pendingSocialVideo?.kind === "local" &&
+      session.pendingSocialVideo?.step === "await_file";
+    const isVideoFile =
+      mime.startsWith("video/") ||
+      /\.(mp4|mov|mkv|webm|m4v)$/i.test(name);
+
+    if (awaitingLocal) {
+      if (!isVideoFile) {
+        await ctx.reply(
+          "Para /local necesito un video (MP4/MOV/MKV/WEBM). O /cancelar."
+        );
+        return;
+      }
+      try {
+        if (doc.file_size && doc.file_size > 18 * 1024 * 1024) {
+          await ctx.reply("El archivo es muy pesado (máx. ~18 MB).");
+          return;
+        }
+        await reply(ctx, "⬇️ Descargando archivo…", { voice: false });
+        const { buffer, ext } = await downloadTelegramFile(ctx, doc.file_id);
+        const fileName = name || `video.${ext || "mp4"}`;
+        await processLocalVideoUpload(ctx, buffer, fileName);
+      } catch (error) {
+        console.error("document/local:", error);
+        await ctx.reply(`❌ ${error.message}`);
+      }
+      return;
+    }
+
     const waitingNota =
       session.photoIntent === "nota" ||
       session.writeFlow?.source === "nota" ||
@@ -4529,7 +6576,7 @@ export async function startBot() {
 
     if (!waitingNota && !isPdf) {
       await ctx.reply(
-        "Si quieres convertir un documento en nota, usa /nota y luego envía el PDF o la foto."
+        "Si quieres convertir un documento en nota, usa /nota y luego envía el PDF o la foto.\nPara un video del PC: /local"
       );
       return;
     }
@@ -4577,7 +6624,7 @@ export async function startBot() {
     await handleAudioInput(ctx, ctx.message.audio.file_id, { transcribeOnly });
   });
 
-  bot.action(/^trad:source:(audio|caption|cancel)$/, async (ctx) => {
+  bot.action(/^trad:source:(audio|caption|text|cancel)$/, async (ctx) => {
     if (unauthorized(ctx)) {
       await ctx.answerCbQuery("No autorizado");
       return;
@@ -4599,9 +6646,43 @@ export async function startBot() {
       }
 
       const pending = session.pendingTradJob;
-      if (!pending || pending.step !== "await_source_mode") {
+      if (
+        !pending ||
+        (pending.step !== "await_source_mode" &&
+          pending.step !== "await_custom_text")
+      ) {
         await ctx.answerCbQuery("No hay /trad pendiente");
         await ctx.reply("No hay video pendiente. Usa /trad con una URL.");
+        return;
+      }
+
+      if (choice === "text") {
+        session.pendingTradJob = {
+          ...pending,
+          step: "await_custom_text",
+        };
+        session.pendingSocialVideo = {
+          kind: "trad",
+          step: "await_custom_text",
+          sourceUrl: pending.sourceUrl,
+        };
+        await ctx.answerCbQuery("Pega el texto");
+        await ctx.reply(
+          [
+            "📋 Pega aquí el texto que quieres narrar.",
+            "Lo traduzco al español, genero el audio y el caption a partir de ese texto.",
+            "",
+            "Mín. 8 caracteres. O /cancelar.",
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (pending.step !== "await_source_mode") {
+        await ctx.answerCbQuery("Elige otra opción o cancela");
+        await ctx.reply(
+          "Estoy esperando el texto pegado. Envía el guion o /cancelar."
+        );
         return;
       }
 
@@ -4635,6 +6716,51 @@ export async function startBot() {
       if (session.pendingTradJob) {
         await discardTradJob(session.pendingTradJob);
         session.pendingTradJob = null;
+      }
+      session.pendingSocialVideo = null;
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.action(/^dub:headline:(yes|no|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    const choice = ctx.match[1];
+
+    try {
+      if (choice === "cancel") {
+        if (session.pendingDubJob) {
+          await discardDubJob(session.pendingDubJob);
+          session.pendingDubJob = null;
+        }
+        session.pendingSocialVideo = null;
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("/dub cancelado.");
+        return;
+      }
+
+      if (!session.pendingDubJob) {
+        await ctx.answerCbQuery("No hay /dub pendiente");
+        await ctx.reply("No hay preparación pendiente. Usa /dub con una URL.");
+        return;
+      }
+
+      await ctx.answerCbQuery(choice === "yes" ? "Con titular" : "Sin titular");
+      await finishDubAfterHeadlineChoice(ctx, choice === "yes");
+    } catch (error) {
+      console.error("dub:headline:", error);
+      if (session.pendingDubJob) {
+        await discardDubJob(session.pendingDubJob);
+        session.pendingDubJob = null;
       }
       session.pendingSocialVideo = null;
       try {
@@ -4724,6 +6850,47 @@ export async function startBot() {
     }
   });
 
+  bot.action(/^write:(continue|rewrite|opinion|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) return;
+    rememberChat(ctx);
+    const action = ctx.match[1];
+    const session = getSession(ctx.chat.id);
+    const wf = session.writeFlow;
+    if (!wf || (wf.step !== "preview" && wf.step !== "preview_feedback")) {
+      await ctx.answerCbQuery("No hay borrador pendiente");
+      return;
+    }
+    try {
+      if (action === "cancel") {
+        const wasArticle = wf.source === "wp" || wf.source === "periodista";
+        cancelWriteFlow(session);
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply(wasArticle ? "Artículo cancelado." : "Redacción cancelada.", {
+          voice: false,
+        });
+        return;
+      }
+      if (action === "continue") {
+        await ctx.answerCbQuery("Continuar");
+        await askFeaturedImage(ctx, session);
+        return;
+      }
+      if (action === "rewrite") {
+        await ctx.answerCbQuery("Reescribir");
+        await rewriteArticleFromPreview(ctx, session, "");
+        return;
+      }
+      if (action === "opinion") {
+        await ctx.answerCbQuery("Opinión");
+        await askArticleOpinion(ctx, session);
+      }
+    } catch (error) {
+      console.error("write action:", error);
+      await ctx.answerCbQuery("Error");
+      await ctx.reply(`❌ ${error.message}`, { voice: false });
+    }
+  });
+
   bot.action(/^pic:(fvdigital|f1rd|done|change|cancel)$/, async (ctx) => {
     if (unauthorized(ctx)) {
       await ctx.answerCbQuery("No autorizado");
@@ -4741,30 +6908,30 @@ export async function startBot() {
       }
       if (action === "done") {
         const flow = session.picFlow;
-        if (!flow?.previewCard) {
+        if (!flow?.previewCard && !flow?.photoBuffer) {
+          const saved = loadLastPic();
+          if (!saved) {
+            await ctx.answerCbQuery("No hay vista previa");
+            await ctx.reply("No hay vista previa activa. Usa /pic de nuevo.");
+            return;
+          }
+          await ctx.answerCbQuery("Enviando último…");
+          cancelPicFlow(session);
+          await publishPicToSocial(ctx, saved);
+          return;
+        }
+        if (!flow?.photoBuffer || !flow?.headline) {
           await ctx.answerCbQuery("No hay vista previa");
           await ctx.reply("No hay vista previa activa. Usa /pic de nuevo.");
           return;
         }
         const dest = flow.dest || "fvdigital";
         const title = flow.headline || "Gráfico";
-        const card = flow.previewCard;
         const photoBuffer = flow.photoBuffer;
         await ctx.answerCbQuery("Enviando…");
-        session.publishDest = dest;
-
-        await ctx.replyWithPhoto(Input.fromBuffer(card, "pic-final.png"), {
-          caption: `✅ ${destLabel(dest)} · listo para publicar`,
-        });
-
-        await sendCardToWebhook(ctx, {
-          card,
-          title,
-          bodyText: title,
-          imageBuffer: photoBuffer,
-        });
-
         cancelPicFlow(session);
+        // Mismo flujo que el resto de gráficos (sendSocialCard → webhook)
+        await publishPicToSocial(ctx, { title, photoBuffer, dest });
         return;
       }
       if (action === "change") {
@@ -4814,7 +6981,13 @@ export async function startBot() {
         await ctx.reply("Destino cancelado.");
         return;
       }
-      if (!pending?.url) {
+      if (!pending?.resume) {
+        await ctx.answerCbQuery("Nada pendiente");
+        await ctx.reply("No hay publicación pendiente. Vuelve a lanzar el comando.");
+        return;
+      }
+      const needsUrl = ["video", "trad", "dub", "link"].includes(pending.resume);
+      if (needsUrl && !pending.url) {
         await ctx.answerCbQuery("No hay enlace");
         await ctx.reply("No hay enlace pendiente. Pega de nuevo la URL.");
         return;
@@ -4891,15 +7064,23 @@ export async function startBot() {
 
     try {
       if (action === "cancel") {
+        if (session.pendingNdigitalJob) {
+          await discardNdigitalJob(session.pendingNdigitalJob);
+          session.pendingNdigitalJob = null;
+        }
+        if (session.pendingLocalJob) {
+          await discardLocalJob(session.pendingLocalJob);
+          session.pendingLocalJob = null;
+        }
         session.pendingSocialVideo = null;
         await ctx.answerCbQuery("Cancelado");
-        await ctx.reply("Envío de /video o /trad cancelado.");
+        await ctx.reply("Envío de /video, /trad, /dub, /ndigital o /local cancelado.");
         return;
       }
 
       if (!pending?.videoUrl) {
         await ctx.answerCbQuery("No hay video pendiente");
-        await ctx.reply("No hay video pendiente. Usa /video o /trad con una URL.");
+        await ctx.reply("No hay video pendiente. Usa /video, /trad, /dub, /ndigital o /local.");
         return;
       }
 
@@ -4914,11 +7095,136 @@ export async function startBot() {
       }
 
       if (action === "send") {
-        await ctx.answerCbQuery("Enviando…");
-        await sendPendingSocialVideoToWebhook(ctx);
+        await ctx.answerCbQuery("Siguiente…");
+        await maybeAskSieThenSend(ctx);
       }
     } catch (error) {
       console.error("svideo callback:", error);
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.action(/^sie:(yes|no|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    const action = ctx.match[1];
+    const pending = session.pendingSocialVideo;
+
+    try {
+      if (action === "cancel") {
+        session.pendingSocialVideo = null;
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("Envío cancelado.");
+        return;
+      }
+      if (!pending?.videoUrl) {
+        await ctx.answerCbQuery("Sin video");
+        await ctx.reply("No hay video pendiente. Usa /video, /trad, /dub, /ndigital o /local.");
+        return;
+      }
+      if (action === "no") {
+        pending.siePick = null;
+        pending.step = "confirm";
+        session.pendingSocialVideo = pending;
+        await ctx.answerCbQuery("Sin SIE");
+        await sendPendingSocialVideoToWebhook(ctx);
+        return;
+      }
+      await ctx.answerCbQuery("Concatenando…");
+      await applySieConcatAndSend(ctx);
+    } catch (error) {
+      console.error("sie callback:", error);
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.action(/^ndigital:(publish|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    const action = ctx.match[1];
+
+    try {
+      if (action === "cancel") {
+        if (session.pendingNdigitalJob) {
+          await discardNdigitalJob(session.pendingNdigitalJob);
+          session.pendingNdigitalJob = null;
+        }
+        session.pendingSocialVideo = null;
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("Recorte /ndigital cancelado.");
+        return;
+      }
+
+      const job = session.pendingNdigitalJob;
+      if (!job?.localPath) {
+        await ctx.answerCbQuery("Sin recorte");
+        await ctx.reply("No hay recorte pendiente. Usa /ndigital con una URL.");
+        return;
+      }
+
+      await ctx.answerCbQuery("Publicando…");
+      await publishNdigitalAfterDest(ctx);
+    } catch (error) {
+      console.error("ndigital callback:", error);
+      try {
+        await ctx.answerCbQuery("Error");
+      } catch {
+        // ignore
+      }
+      await ctx.reply(`❌ ${error.message}`);
+    }
+  });
+
+  bot.action(/^local:(publish|cancel)$/, async (ctx) => {
+    if (unauthorized(ctx)) {
+      await ctx.answerCbQuery("No autorizado");
+      return;
+    }
+    rememberChat(ctx);
+    const session = getSession(ctx.chat.id);
+    const action = ctx.match[1];
+
+    try {
+      if (action === "cancel") {
+        if (session.pendingLocalJob) {
+          await discardLocalJob(session.pendingLocalJob);
+          session.pendingLocalJob = null;
+        }
+        session.pendingSocialVideo = null;
+        await ctx.answerCbQuery("Cancelado");
+        await ctx.reply("Preparación /local cancelada.");
+        return;
+      }
+
+      const job = session.pendingLocalJob;
+      if (!job?.localPath) {
+        await ctx.answerCbQuery("Sin video");
+        await ctx.reply("No hay video pendiente. Usa /local y envía el archivo.");
+        return;
+      }
+
+      await ctx.answerCbQuery("Publicando…");
+      await publishLocalAfterDest(ctx);
+    } catch (error) {
+      console.error("local callback:", error);
       try {
         await ctx.answerCbQuery("Error");
       } catch {
@@ -4942,10 +7248,18 @@ export async function startBot() {
     const trimmed = incoming.trim();
     const url = extractUrlFromMessage(ctx);
 
-    // /video o /trad: esperando URL (o texto si es /trad)
+    // /video, /trad, /dub o /ndigital: esperando URL (o texto si es /trad)
     if (session.pendingSocialVideo?.step === "await_url") {
       const videoUrl = url || extractFirstUrl(trimmed);
-      const kind = session.pendingSocialVideo.kind === "trad" ? "trad" : "video";
+      const pendingKind = session.pendingSocialVideo.kind || "video";
+      const kind =
+        pendingKind === "trad"
+          ? "trad"
+          : pendingKind === "dub"
+            ? "dub"
+            : pendingKind === "ndigital"
+              ? "ndigital"
+              : "video";
       if (!videoUrl) {
         if (kind === "trad" && trimmed.length >= 8) {
           try {
@@ -4961,20 +7275,78 @@ export async function startBot() {
         await ctx.reply(
           kind === "trad"
             ? "Envía un enlace de video o pega un texto (mín. 8 caracteres). O /cancelar."
-            : "Necesito un enlace válido (YouTube, Instagram, Facebook, Dailymotion o X). O /cancelar."
+            : kind === "dub"
+              ? "Necesito un enlace válido para /dub (YouTube, Instagram, Facebook, Dailymotion o X). O /cancelar."
+              : kind === "ndigital"
+                ? "Necesito un enlace válido para /ndigital. O /cancelar."
+                : "Necesito un enlace válido (YouTube, Instagram, Facebook, Dailymotion o X). O /cancelar."
         );
         return;
       }
       try {
         session.pendingSocialVideo = null;
+        if (kind === "ndigital") {
+          await processNdigitalVideoUrl(ctx, videoUrl);
+          return;
+        }
         if (await maybeAskPublishDest(ctx, videoUrl, [], kind)) return;
         if (kind === "trad") {
           await processTradVideoUrl(ctx, videoUrl);
+        } else if (kind === "dub") {
+          await processDubVideoUrl(ctx, videoUrl);
         } else {
           await processSocialVideoUrl(ctx, videoUrl);
         }
       } catch (error) {
         console.error("pendingSocialVideo URL:", error);
+        await ctx.reply(`❌ ${error.message}`);
+      }
+      return;
+    }
+
+    // /trad video: esperando texto pegado para audio + caption
+    if (
+      (session.pendingTradJob?.step === "await_custom_text" ||
+        session.pendingSocialVideo?.step === "await_custom_text") &&
+      !url
+    ) {
+      const pending = session.pendingTradJob;
+      if (!pending || pending.step !== "await_custom_text") {
+        await ctx.reply("No hay /trad esperando texto. Usa /trad con una URL.");
+        return;
+      }
+      if (trimmed.length < 8) {
+        await ctx.reply(
+          "El texto es muy corto (mín. 8 caracteres). Pega el guion completo o /cancelar."
+        );
+        return;
+      }
+      try {
+        await reply(
+          ctx,
+          "📋 Texto recibido. Traduzco, genero audio y preparo caption…",
+          { voice: false }
+        );
+        const job = await continueTradJob(pending, {
+          mode: "from_text",
+          customText: trimmed,
+          onStatus: (msg) => reply(ctx, msg, { voice: false }).catch(() => {}),
+        });
+        session.pendingTradJob = job;
+        session.pendingSocialVideo = {
+          kind: "trad",
+          step: "ask_headline",
+          sourceUrl: job.sourceUrl,
+          headline: job.headline,
+        };
+        await askTradHeadlineConfirm(ctx, job);
+      } catch (error) {
+        console.error("trad custom text:", error);
+        if (session.pendingTradJob) {
+          await discardTradJob(session.pendingTradJob);
+          session.pendingTradJob = null;
+        }
+        session.pendingSocialVideo = null;
         await ctx.reply(`❌ ${error.message}`);
       }
       return;
@@ -5014,7 +7386,14 @@ export async function startBot() {
     // /video: editando caption
     if (session.pendingSocialVideo?.step === "edit_caption") {
       const pending = session.pendingSocialVideo;
-      pending.caption = ensureCaptionHashtag(trimmed, session.publishDest || "fvdigital");
+      let pasted = trimmed;
+      try {
+        pasted = await ensureSpanishCaption(trimmed);
+        if (pasted !== trimmed) await ctx.reply("🌐 Caption traducido al español.");
+      } catch (error) {
+        console.warn("ensureSpanishCaption:", error.message);
+      }
+      pending.caption = ensureCaptionHashtag(pasted, session.publishDest || "fvdigital");
       pending.step = "confirm";
       session.pendingSocialVideo = pending;
       if (session.lastVideo) session.lastVideo.caption = pending.caption;
@@ -5075,6 +7454,16 @@ export async function startBot() {
         await ctx.reply(`❌ ${error.message}`);
       }
       return;
+    }
+
+    if (isEncuestaFlowActive(session)) {
+      try {
+        if (await handleEncuestaFlowText(ctx, trimmed)) return;
+      } catch (error) {
+        console.error("encuestaFlow text:", error);
+        await ctx.reply(`❌ ${error.message}`);
+        return;
+      }
     }
 
     if (isPicFlowActive(session)) {
@@ -5142,17 +7531,104 @@ export async function startBot() {
 
   writeFileSync(PID_FILE, String(process.pid));
 
+  /** Heartbeat Telegram: si getMe falla repetido, el proceso sale y keepalive lo levanta. */
+  let lastTelegramOkAt = Date.now();
+  let telegramFailStreak = 0;
+  const TELEGRAM_FAIL_LIMIT = 3;
+
+  async function pingTelegramApi() {
+    try {
+      await bot.telegram.getMe();
+      lastTelegramOkAt = Date.now();
+      telegramFailStreak = 0;
+      return true;
+    } catch (error) {
+      telegramFailStreak += 1;
+      console.warn(
+        `telegram getMe falló (${telegramFailStreak}/${TELEGRAM_FAIL_LIMIT}):`,
+        error.message || error
+      );
+      return false;
+    }
+  }
+
   const httpServer = await startHttpServer({
     port: config.server.port,
-    getStatus: () => ({
-      telegram: "online",
-      activeSessions: sessions.size,
-      video: {
-        hyperframes: config.video.hyperframes.enabled,
-        remotion: config.video.remotion.enabled,
-        heygen: config.video.heygen.enabled && Boolean(config.video.heygen.apiKey),
-      },
-    }),
+    getStatus: () => {
+      const ageSec = Math.floor((Date.now() - lastTelegramOkAt) / 1000);
+      const telegramOk = ageSec < 180 && telegramFailStreak < TELEGRAM_FAIL_LIMIT;
+      return {
+        ok: telegramOk,
+        telegram: telegramOk ? "online" : "degraded",
+        telegramOk,
+        lastTelegramOkAgeSec: ageSec,
+        telegramFailStreak,
+        activeSessions: sessions.size,
+        lastPicPending: Boolean(loadLastPic()?.pending),
+        video: {
+          hyperframes: config.video.hyperframes.enabled,
+          remotion: config.video.remotion.enabled,
+          heygen: config.video.heygen.enabled && Boolean(config.video.heygen.apiKey),
+        },
+      };
+    },
+    onRequest: async (req, res, path) => {
+      const feedBrand = graphicsFeedBrandFromPath(path);
+      if (feedBrand && (req.method === "GET" || req.method === "HEAD")) {
+        const xml = renderGraphicsFeedXml(feedBrand);
+        res.writeHead(200, {
+          "Content-Type": "application/rss+xml; charset=utf-8",
+          "Cache-Control": "public, max-age=60",
+        });
+        if (req.method !== "HEAD") res.end(xml);
+        else res.end();
+        return true;
+      }
+      if ((path === "/feed" || path === "/feeds") && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify(
+            {
+              ok: true,
+              fvdigital: "/feed/fvdigital.xml",
+              f1rd: "/feed/f1rd.xml",
+            },
+            null,
+            2
+          )
+        );
+        return true;
+      }
+      if (path !== "/pic/publish-last" || req.method !== "POST") return false;
+      const saved = loadLastPic();
+      if (!saved) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "no hay /pic guardado" }));
+        return true;
+      }
+      let chatId = null;
+      try {
+        chatId = JSON.parse(readFileSync(LAST_CHAT_FILE, "utf8")).chatId;
+      } catch {
+        // ignore
+      }
+      if (!chatId) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "falta .last-chat.json" }));
+        return true;
+      }
+      const ctx = {
+        chat: { id: chatId },
+        telegram: bot.telegram,
+        reply: (text, extra) => bot.telegram.sendMessage(chatId, text, extra),
+        replyWithPhoto: (photo, extra) => bot.telegram.sendPhoto(chatId, photo, extra),
+        sendChatAction: (action) => bot.telegram.sendChatAction(chatId, action),
+      };
+      await publishPicToSocial(ctx, saved);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, title: saved.title, dest: saved.dest }));
+      return true;
+    },
   });
 
   try {
@@ -5168,7 +7644,12 @@ export async function startBot() {
       { command: "encuestas", description: "1 encuesta pendiente FV" },
       { command: "video", description: "Video redes → webhook" },
       { command: "trad", description: "Video doblaje/overlay o texto IA" },
+      { command: "dub", description: "Doblaje ElevenLabs a español" },
+      { command: "ndigital", description: "Reel N Digital → crop + preview" },
+      { command: "local", description: "Video PC → STT + WP + redes + webhook" },
       { command: "foto", description: "Video Termómetro" },
+      { command: "pic", description: "Foto + texto → tarjeta redes" },
+      { command: "feeds", description: "RSS gráficos FV y F1RD" },
       { command: "publicar", description: "Publicar borrador" },
       { command: "estado", description: "Estado del bot" },
       { command: "cancelar", description: "Cancelar flujo" },
@@ -5213,6 +7694,29 @@ export async function startBot() {
     httpServer.close();
     process.exit(1);
   });
+
+  // Ping API cada 45s; 3 fallos → salir para que keepalive reinicie
+  setInterval(async () => {
+    const ok = await pingTelegramApi();
+    if (!ok && telegramFailStreak >= TELEGRAM_FAIL_LIMIT) {
+      console.error("Telegram API caída — reinicio del proceso (keepalive lo levantará)");
+      cleanupPidFile();
+      try {
+        httpServer.close();
+      } catch {
+        // ignore
+      }
+      try {
+        bot.stop("telegram-degraded");
+      } catch {
+        // ignore
+      }
+      process.exit(1);
+    }
+  }, 45_000);
+
+  // Primera comprobación al arrancar
+  pingTelegramApi().catch(() => {});
 
   console.log(
     `JARVIS online — FV Digital (Telegram + DeepSeek + Mistral) — http://127.0.0.1:${config.server.port}`

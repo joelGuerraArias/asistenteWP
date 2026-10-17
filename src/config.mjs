@@ -96,6 +96,15 @@ export const config = {
     mistralChatModel:
       process.env.MISTRAL_CHAT_MODEL || "mistral-small-latest",
     openaiApiKey: process.env.OPENAI_API_KEY || "",
+    /** Fallback TTS si Mistral falla — https://developers.openai.com/api/docs/guides/text-to-speech */
+    openaiTtsModel: process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
+    openaiTtsVoice: process.env.OPENAI_TTS_VOICE || "cedar",
+    openaiTtsInstructions:
+      process.env.OPENAI_TTS_INSTRUCTIONS ||
+      "Speak clear Spanish with a natural news presenter tone. Neutral Latin American accent.",
+    /** Fallback STT si Mistral/Groq fallan */
+    openaiSttModel: process.env.OPENAI_STT_MODEL || "whisper-1",
+    openaiChatModel: process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini",
     groqApiKey: process.env.GROQ_API_KEY || "",
     language: process.env.SPEECH_LANGUAGE || "es",
     ttsLang: process.env.TTS_LANGUAGE || "es",
@@ -140,7 +149,8 @@ export const config = {
   feedRepost: {
     enabled: process.env.FEED_REPOST_ENABLED !== "false",
     url: process.env.FEED_REPOST_URL || "https://fvdigital.do/feed",
-    count: Math.max(1, Math.min(10, Number(process.env.FEED_REPOST_COUNT || 2))),
+    /** FV Digital: noticias nuevas por corrida (4 por defecto). */
+    count: Math.max(1, Math.min(10, Number(process.env.FEED_REPOST_COUNT || 4))),
     start: process.env.FEED_REPOST_START || "09:15",
     end: process.env.FEED_REPOST_END || "21:15",
     fvEnabled: process.env.FEED_REPOST_FV !== "false",
@@ -158,12 +168,19 @@ export const config = {
   },
   encuestas: {
     dir: join(root, process.env.ENCUESTAS_DIR || "encuestas"),
-    cronTime: process.env.ENCUESTAS_CRON_TIME || "10:00",
-    checkTime: process.env.ENCUESTAS_CHECK_TIME || "09:00",
+    /** Publicaciones temáticas (ALPHA): default 09:00 y 16:00 */
+    cronTime: process.env.ENCUESTAS_CRON_TIME || "09:00,16:00",
+    cronTimes: String(process.env.ENCUESTAS_CRON_TIME || "09:00,16:00")
+      .split(/[,;\s]+/)
+      .map((t) => t.trim())
+      .filter(Boolean),
+    checkTime: process.env.ENCUESTAS_CHECK_TIME || "",
     dailyCount: Math.max(
       1,
       Math.min(10, Number(process.env.ENCUESTAS_DAILY_COUNT || 1))
     ),
+    /** tema | personas | auto — cron diario usa tema por defecto */
+    mode: String(process.env.ENCUESTAS_MODE || "tema").toLowerCase(),
   },
   r2: {
     publicBaseUrl: (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/$/, ""),
@@ -209,6 +226,15 @@ export const config = {
     smtpUser: process.env.BREVO_SMTP_USER || "",
     smtpServer: process.env.BREVO_SMTP_SERVER || "smtp-relay.brevo.com",
     smtpPort: Number(process.env.BREVO_SMTP_PORT || 587),
+    /** API HTTPS (443) — se usa si el SMTP está bloqueado (VPN/ISP).
+     *  Requiere una clave de API v3 de Brevo (empieza por "xkeysib-").
+     *  La clave SMTP (xsmtpsib-) NO sirve para la API. */
+    apiV3Key:
+      process.env.BREVO_API_V3_KEY ||
+      (String(process.env.BREVO_API_KEY || "").startsWith("xkeysib-")
+        ? process.env.BREVO_API_KEY
+        : ""),
+    apiUrl: (process.env.BREVO_API_URL || "https://api.brevo.com/v3").replace(/\/$/, ""),
     senderEmail: process.env.BREVO_SENDER_EMAIL || "",
     senderName: process.env.BREVO_SENDER_NAME || "FGJ Medios - Sistema de Análisis",
     get enabled() {
@@ -355,10 +381,33 @@ export const config = {
       14,
       Math.max(1, Number(process.env.INTRANT_FB_SEARCH_DAYS) || 3)
     ),
+    /** Ventana YT/IG Apify fallback (hoy + N días atrás). Digests Gmail no usan esto. */
+    socialSearchDays: Math.min(
+      14,
+      Math.max(1, Number(process.env.REPORTE_SOCIAL_DAYS) || 3)
+    ),
     instagramStartUrls: String(process.env.INTRANT_IG_START_URLS || "")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+  },
+  /** Así va el día — digest alertas sheet Intrant → correo 12:00 y 16:00 */
+  asiVaElDia: {
+    enabled: process.env.ASI_VA_EL_DIA_ENABLED !== "false",
+    cronTimes: (() => {
+      const raw = process.env.ASI_VA_EL_DIA_CRON_TIMES || "12:00,16:00";
+      return String(raw)
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((t) => {
+          const [h, m = "0"] = t.split(":");
+          return {
+            hour: Math.min(23, Math.max(0, Number(h) || 0)),
+            minute: Math.min(59, Math.max(0, Number(m) || 0)),
+          };
+        });
+    })(),
   },
   electricAlerts: {
     /** false cuando EDESUR_ENABLED=false */
@@ -494,6 +543,91 @@ export const config = {
     /** false = sin PNG de marca encima del reel (solo 9:16 + titular opcional). */
     overlayEnabled: process.env.TRAD_OVERLAY === "true",
     overlayPath: process.env.TRAD_OVERLAY_PATH || "",
+  },
+  /** /dub — ElevenLabs Dubbing API (project) → siempre a español (es) → reel 9:16 */
+  dub: {
+    elevenApiKey: process.env.ELEVENLABS_API_KEY || "",
+    /** Fijo: /dub siempre dobla a español. */
+    targetLanguage: "es",
+    /** vacío = auto-detect del origen */
+    sourceLanguage: process.env.DUB_SOURCE_LANGUAGE || "",
+    modelId: process.env.DUB_MODEL_ID || "dubbing_v2",
+    pollMs: Math.min(30_000, Math.max(3000, Number(process.env.DUB_POLL_MS || 5000))),
+    maxWaitMs: Math.min(
+      60 * 60 * 1000,
+      Math.max(60_000, Number(process.env.DUB_MAX_WAIT_MS || 25 * 60 * 1000))
+    ),
+    originalVolume: Math.min(
+      1,
+      Math.max(0, Number(process.env.DUB_ORIGINAL_VOLUME || process.env.TRAD_ORIGINAL_VOLUME || 0.05))
+    ),
+    dubVolume: Math.min(
+      4,
+      Math.max(0.5, Number(process.env.DUB_DUB_VOLUME || process.env.TRAD_DUB_VOLUME || 2))
+    ),
+    headlineDelay: Math.min(
+      30,
+      Math.max(0, Number(process.env.DUB_HEADLINE_DELAY || process.env.TRAD_HEADLINE_DELAY || 7))
+    ),
+    headlineTypeSeconds: Math.min(
+      10,
+      Math.max(
+        0.5,
+        Number(process.env.DUB_HEADLINE_TYPE_SECONDS || process.env.TRAD_HEADLINE_TYPE_SECONDS || 2)
+      )
+    ),
+    headlineVisibleSeconds: Math.min(
+      30,
+      Math.max(
+        3,
+        Number(
+          process.env.DUB_HEADLINE_VISIBLE_SECONDS ||
+            process.env.TRAD_HEADLINE_VISIBLE_SECONDS ||
+            10
+        )
+      )
+    ),
+    width: Number(process.env.DUB_WIDTH || process.env.TRAD_WIDTH || 1080),
+    height: Number(process.env.DUB_HEIGHT || process.env.TRAD_HEIGHT || 1920),
+  },
+  /** /ndigital — crop overlays N.com.do + trim final */
+  ndigital: {
+    cropTop: Math.max(0, Number(process.env.NDIGITAL_CROP_TOP || 200)),
+    cropBottom: Math.max(0, Number(process.env.NDIGITAL_CROP_BOTTOM || 565)),
+    trimEndSec: Math.max(0, Number(process.env.NDIGITAL_TRIM_END_SEC || 6)),
+    ffmpegPath: process.env.FFMPEG_PATH || "",
+    width: Number(process.env.NDIGITAL_WIDTH || 1080),
+    height: Number(process.env.NDIGITAL_HEIGHT || 1920),
+    /** Logo sobre el inicio del video (no banda negra aparte). */
+    logoPadTop: Math.max(0, Number(process.env.NDIGITAL_LOGO_PAD_TOP || 16)),
+    titleBand: Math.max(120, Number(process.env.NDIGITAL_TITLE_BAND || 200)),
+  },
+  /** Bumper SIE al final de videos enviados a FV Digital */
+  sieBumper: {
+    enabled: process.env.SIE_BUMPER_ENABLED !== "false",
+    dir:
+      process.env.SIE_BUMPER_DIR ||
+      "C:\\Users\\Joel Guerra\\Desktop\\VideoCreator\\sie",
+    statePath: process.env.SIE_BUMPER_STATE
+      ? join(root, process.env.SIE_BUMPER_STATE)
+      : join(root, ".sie-rotation.json"),
+    ffmpegPath: process.env.FFMPEG_PATH || "",
+  },
+  /** Cron 06:00: 1 video SIE/día → STT (1 vez, cache) + caption → webhook (sin lower-third) */
+  siePublish: {
+    enabled: process.env.SIE_PUBLISH_ENABLED !== "false",
+    dir:
+      process.env.SIE_PUBLISH_DIR ||
+      process.env.SIE_BUMPER_DIR ||
+      "C:\\Users\\Joel Guerra\\Desktop\\VideoCreator\\sie",
+    statePath: process.env.SIE_PUBLISH_STATE
+      ? join(root, process.env.SIE_PUBLISH_STATE)
+      : join(root, ".sie-publish-rotation.json"),
+    transcriptsPath: process.env.SIE_TRANSCRIPTS_PATH
+      ? join(root, process.env.SIE_TRANSCRIPTS_PATH)
+      : join(root, ".sie-transcripts.json"),
+    cronTime: process.env.SIE_PUBLISH_CRON_TIME || "06:00",
+    ffmpegPath: process.env.FFMPEG_PATH || "",
   },
 };
 

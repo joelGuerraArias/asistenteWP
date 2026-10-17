@@ -1,4 +1,10 @@
 import { config } from "./config.mjs";
+import { appendGraphicsFeedItem } from "./graphics-feed.mjs";
+import {
+  archiveProducedGraphicFromUrl,
+  archiveProducedVideoFromUrl,
+  looksLikeImageUrl,
+} from "./video-archive.mjs";
 
 const QUEUED_GATEWAY_STATUS = new Set([202, 408, 502, 503, 504, 520, 522, 524]);
 const WEBHOOK_TIMEOUT_MS = 20000;
@@ -31,6 +37,43 @@ export function destLabel(dest = "fvdigital") {
   if (dest === "both") return "FV Digital + F1RD";
   if (dest === "f1rd") return "F1RD";
   return "FV Digital";
+}
+
+async function pushGraphicsRss({ imageUrl, videoUrl, mediaType, target, title, caption }) {
+  if (videoUrl || !imageUrl) return;
+  const kind = String(mediaType || "IMAGE").toUpperCase();
+  if (kind !== "IMAGE") return;
+  try {
+    await appendGraphicsFeedItem({
+      brand: target,
+      title,
+      caption,
+      imageUrl,
+    });
+  } catch (err) {
+    console.warn("graphics-feed:", err.message);
+  }
+}
+
+async function archiveMediaIfAny({ imageUrl, videoUrl, mediaType, caption }) {
+  const kind = String(mediaType || "").toUpperCase();
+  const img = String(imageUrl || "").trim();
+  const vid = String(videoUrl || "").trim();
+  const asImage =
+    kind === "IMAGE" ||
+    (!kind && img && !vid) ||
+    looksLikeImageUrl(img) ||
+    (kind !== "VIDEO" && looksLikeImageUrl(vid));
+  try {
+    if (asImage) {
+      const url = img || vid;
+      if (url) await archiveProducedGraphicFromUrl(url, caption);
+      return;
+    }
+    if (vid) await archiveProducedVideoFromUrl(vid, caption);
+  } catch (err) {
+    console.warn("media-archive:", err.message);
+  }
 }
 
 export function destPrimaryHashtag(dest = "fvdigital") {
@@ -173,11 +216,26 @@ export async function publishToWebhook({
     }
 
     if (res.ok) {
-      return { ok: true, status: res.status, body, target, caption: finalCaption };
+      const result = { ok: true, status: res.status, body, target, caption: finalCaption };
+      await pushGraphicsRss({
+        imageUrl,
+        videoUrl,
+        mediaType: payload.mediaType,
+        target,
+        title: payload.title,
+        caption: finalCaption,
+      });
+      await archiveMediaIfAny({
+        imageUrl,
+        videoUrl,
+        mediaType: payload.mediaType,
+        caption: finalCaption,
+      });
+      return result;
     }
 
     if (QUEUED_GATEWAY_STATUS.has(res.status)) {
-      return {
+      const result = {
         ok: true,
         queued: true,
         status: res.status,
@@ -185,18 +243,48 @@ export async function publishToWebhook({
         target,
         caption: finalCaption,
       };
+      await pushGraphicsRss({
+        imageUrl,
+        videoUrl,
+        mediaType: payload.mediaType,
+        target,
+        title: payload.title,
+        caption: finalCaption,
+      });
+      await archiveMediaIfAny({
+        imageUrl,
+        videoUrl,
+        mediaType: payload.mediaType,
+        caption: finalCaption,
+      });
+      return result;
     }
 
     return { ok: false, status: res.status, body, target };
   } catch (error) {
     if (error.name === "AbortError") {
-      return {
+      const result = {
         ok: true,
         queued: true,
         error: "timeout local (n8n procesando)",
         target,
         caption: finalCaption,
       };
+      await pushGraphicsRss({
+        imageUrl,
+        videoUrl,
+        mediaType: payload.mediaType,
+        target,
+        title: payload.title,
+        caption: finalCaption,
+      });
+      await archiveMediaIfAny({
+        imageUrl,
+        videoUrl,
+        mediaType: payload.mediaType,
+        caption: finalCaption,
+      });
+      return result;
     }
     return { ok: false, error: error.message, target };
   } finally {

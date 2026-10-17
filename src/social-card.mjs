@@ -20,35 +20,18 @@ function escapeXml(text = "") {
     .replace(/'/g, "&apos;");
 }
 
-/** Reparte el texto en exactamente 2 líneas (lo más parejas posible), sin cortar palabras ni caracteres. */
-function balanceTwoLines(text) {
-  const words = String(text)
-    .replace(/[\r\n]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
-  if (!words.length) return [""];
-  if (words.length === 1) return [words[0]];
+/** Factor conservador para Montserrat Bold 800 (subestimar ≈ desborde). */
+const TITLE_CHAR_FACTOR = 0.64;
 
-  let best = null;
-  for (let i = 1; i < words.length; i++) {
-    const l1 = words.slice(0, i).join(" ");
-    const l2 = words.slice(i).join(" ");
-    const diff = Math.abs(l1.length - l2.length);
-    if (!best || diff < best.diff) {
-      best = { diff, lines: [l1, l2] };
-    }
-  }
-  return best.lines;
+function estimateLineWidth(text, fontSizePx) {
+  return String(text || "").length * fontSizePx * TITLE_CHAR_FACTOR;
 }
 
 /**
- * Layout del titular en la tarjeta (45px):
- * - ≤5 palabras → 1 línea
- * - 6+ palabras → 2 líneas (máximo)
+ * Wrap por ancho a fuente fija (sin bajar px).
+ * Hasta 3 líneas; no corta palabras ni caracteres.
  */
-function layoutTitle(text, { fontSizePx }) {
+function layoutTitle(text, { fontSizePx, maxWidthPx }) {
   const clean = String(text || "")
     .replace(/[\r\n]+/g, " ")
     .replace(/\s+/g, " ")
@@ -56,14 +39,36 @@ function layoutTitle(text, { fontSizePx }) {
   const words = clean.split(/\s+/).filter(Boolean);
   if (!words.length) return { fontSize: fontSizePx, lines: [""] };
 
-  if (words.length <= 5) {
+  const maxW = Math.max(1, Number(maxWidthPx) || 0);
+  const maxLines = 3;
+
+  if (!maxW) {
     return { fontSize: fontSizePx, lines: [clean] };
   }
 
-  let lines = balanceTwoLines(clean);
-  if (lines.length > 2) {
-    lines = [lines[0], lines.slice(1).join(" ")];
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (
+      current &&
+      estimateLineWidth(candidate, fontSizePx) > maxW &&
+      lines.length < maxLines - 1
+    ) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
   }
+  if (current) lines.push(current);
+
+  // Si quedó >3 (palabra gigante + resto), fusionar el excedente en la última.
+  while (lines.length > maxLines) {
+    const last = lines.pop();
+    lines[lines.length - 1] = `${lines[lines.length - 1]} ${last}`;
+  }
+
   return { fontSize: fontSizePx, lines };
 }
 
@@ -90,7 +95,7 @@ export async function fetchImageBuffer(url) {
 export async function prepareSquareBackground(
   buffer,
   size,
-  { contentBottom = size, sideInset = 0 } = {}
+  { contentBottom = size, sideInset = 0, position = "north" } = {}
 ) {
   const oriented = await sharp(buffer, { failOn: "none" }).rotate().toBuffer();
 
@@ -99,6 +104,7 @@ export async function prepareSquareBackground(
   const areaW = Math.max(1, size - sideInset * 2);
   const areaH = Math.max(1, contentBottom - sideInset);
   const areaBottom = areaTop + areaH;
+  const coverPosition = position || "north";
 
   const blurBg = await sharp(oriented, { failOn: "none" })
     .resize(size, size, {
@@ -110,11 +116,11 @@ export async function prepareSquareBackground(
     .modulate({ brightness: 0.72, saturation: 0.9 })
     .toBuffer();
 
-  // Cover en todo el área de contenido; recorte preferente desde arriba.
+  // Cover desde arriba (north) para no cortar caras en encuestas/retratos.
   const covered = await sharp(oriented, { failOn: "none" })
     .resize(areaW, areaH, {
       fit: "cover",
-      position: "south",
+      position: coverPosition,
       kernel: "lanczos3",
     })
     .png()
@@ -171,11 +177,18 @@ export async function generateNewsCard({
     logoMeta = await sharp(logoBuffer).metadata();
   }
 
-  // Letra fija 45px @1080; titular SIEMPRE ≤ 2 líneas (texto completo).
+  // Letra fija 45px @1080; wrap por ancho (máx. 3 líneas), sin bajar fuente.
   const titleFontPx = Math.max(14, Math.round((45 * size) / 1080));
-  const laid = layoutTitle(title, { fontSizePx: titleFontPx });
+  const titlePadX = Math.round(titleFontPx * 0.45);
+  const titlePadY = Math.round(titleFontPx * 0.28);
+  const maxTitleOuter = Math.max(1, size - pad * 2);
+  const maxTitleTextW = Math.max(1, maxTitleOuter - titlePadX * 2);
+  const laid = layoutTitle(title, {
+    fontSizePx: titleFontPx,
+    maxWidthPx: maxTitleTextW,
+  });
   const titleFont = laid.fontSize;
-  const titleLines = laid.lines.slice(0, 2);
+  const titleLines = laid.lines.slice(0, 3);
   const titleLineH = Math.round(titleFont * 1.2);
 
   const socialFont = Math.round(size * 0.036);
@@ -186,14 +199,14 @@ export async function generateNewsCard({
     photoBottom + (size - photoBottom) / 2 + socialFont * 0.35
   );
 
-  // Bloque rojo: borde inferior = borde inferior de la foto (mismo corte).
-  const charFactor = 0.56;
-  const longest = Math.max(...titleLines.map((l) => l.length), 1);
-  const titlePadX = Math.round(titleFont * 0.45);
-  const titlePadY = Math.round(titleFont * 0.28);
+  // Bloque rojo: cubre el texto estimado y nunca sale del pad.
+  const longestW = Math.max(
+    ...titleLines.map((l) => estimateLineWidth(l, titleFont)),
+    1
+  );
   const titleBgW = Math.min(
-    size - pad * 2,
-    Math.round(longest * titleFont * charFactor + titlePadX * 2)
+    maxTitleOuter,
+    Math.round(longestW + titlePadX * 2)
   );
   const titleBgH = Math.round(
     titleLines.length * titleLineH + titlePadY * 2 - titleFont * 0.15

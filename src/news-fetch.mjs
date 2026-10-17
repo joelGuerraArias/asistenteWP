@@ -250,7 +250,72 @@ function extractPublishedAt(html = "") {
   const time = html.match(
     /<time[^>]+datetime=["']([^"']+)["'][^>]*>/i
   );
-  return time?.[1]?.trim() || "";
+  if (time?.[1]?.trim()) return time[1].trim();
+
+  // Fecha visible en el cuerpo (medios RD): "10 de septiembre de 2026", "10/09/2026"
+  const fromBody = extractDateFromArticleBody(stripTagsLight(html).slice(0, 2500));
+  return fromBody || "";
+}
+
+function stripTagsLight(html = "") {
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const MONTHS_ES = {
+  enero: 1,
+  febrero: 2,
+  marzo: 3,
+  abril: 4,
+  mayo: 5,
+  junio: 6,
+  julio: 7,
+  agosto: 8,
+  septiembre: 9,
+  setiembre: 9,
+  octubre: 10,
+  noviembre: 11,
+  diciembre: 12,
+};
+
+/** Extrae fecha del texto visible del artículo (cuerpo/bajada). */
+export function extractDateFromArticleBody(text = "") {
+  const t = String(text || "");
+  if (!t) return "";
+
+  const long = t.match(
+    /(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s+de\s+(20\d{2})/i
+  );
+  if (long) {
+    const day = String(Number(long[1])).padStart(2, "0");
+    const month = String(MONTHS_ES[long[2].toLowerCase()] || 0).padStart(2, "0");
+    const year = long[3];
+    if (month !== "00") return `${year}-${month}-${day}`;
+  }
+
+  const slash = t.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](20\d{2})\b/);
+  if (slash) {
+    const a = Number(slash[1]);
+    const b = Number(slash[2]);
+    const year = slash[3];
+    // Prefer DD/MM/YYYY (RD)
+    let day = a;
+    let month = b;
+    if (a <= 12 && b > 12) {
+      month = a;
+      day = b;
+    }
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
+  return "";
 }
 
 function extractAuthor(html = "") {

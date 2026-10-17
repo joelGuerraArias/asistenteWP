@@ -1,4 +1,4 @@
-# Registra arranque automático + keepalive cada 3 min (sin admin)
+# Registra arranque automático + keepalive cada 2 min (sin admin)
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $TaskName = "AsistenteWP-JARVIS"
@@ -49,12 +49,12 @@ Register-JarvisTask `
     -Description "Bot Telegram JARVIS — FV Digital (arranque al login, puerto 9000)" `
     -Trigger $logonTrigger
 
-# 2) Keepalive cada 3 minutos (reinicia si el health check falla)
-$keepTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 3) -RepetitionDuration (New-TimeSpan -Days 3650)
+# 2) Keepalive cada 2 minutos (reinicia si health/Telegram falla o uptime alto)
+$keepTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration (New-TimeSpan -Days 3650)
 Register-JarvisTask `
     -Name $KeepaliveName `
     -ScriptPath $KeepScript `
-    -Description "Keepalive JARVIS — reinicia el bot si http://127.0.0.1:9000/health falla" `
+    -Description "Keepalive JARVIS — reinicia si health/Telegram falla o proceso >6h" `
     -Trigger $keepTrigger
 
 # 3) Acceso directo en Startup (respaldo)
@@ -73,7 +73,7 @@ $shortcut.Save()
 Write-Host ""
 Write-Host "Autoinicio + keepalive instalados:"
 Write-Host "  - Tarea: $TaskName (al iniciar sesión)"
-Write-Host "  - Tarea: $KeepaliveName (cada 3 min si está caído)"
+Write-Host "  - Tarea: $KeepaliveName (cada 2 min si health/Telegram falla)"
 Write-Host "  - Acceso directo: $StartupLnk"
 Write-Host "  - Health: http://127.0.0.1:9000/health"
 Write-Host ""

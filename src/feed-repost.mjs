@@ -117,25 +117,83 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
 }
 
-function stateKey(brand, item) {
-  return `${brand}::${item.id}`;
-}
-
 function markSent(state, brand, item, meta = {}) {
-  state.sent[stateKey(brand, item)] = {
+  const link = cleanLink(item.link || "");
+  const id = String(item.id || link || "").trim();
+  const entry = {
     brand,
-    link: item.link,
-    title: item.title,
+    link: link || id,
+    title: item.title || "",
     at: new Date().toISOString(),
     ...meta,
   };
+  if (id) state.sent[`${brand}::${id}`] = entry;
+  if (link && link !== id) state.sent[`${brand}::${link}`] = entry;
+  // Si el id era el link, ya quedó una sola clave.
+  if (!id && link) state.sent[`${brand}::${link}`] = entry;
 }
 
 function isSent(state, brand, item) {
-  return Boolean(
-    state.sent[stateKey(brand, item)] ||
-      state.sent[`${brand}::${item.link}`]
-  );
+  const link = cleanLink(item.link || "");
+  const id = String(item.id || "").trim();
+  if (id && state.sent[`${brand}::${id}`]) return true;
+  if (link && state.sent[`${brand}::${link}`]) return true;
+  if (link) {
+    for (const [key, val] of Object.entries(state.sent)) {
+      if (!key.startsWith(`${brand}::`)) continue;
+      if (val?.link && cleanLink(val.link) === link) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Marca URLs/GUIDs como ya publicados a redes.
+ * Llamar desde bot/encuestas tras WP+webhook para que el cron feed-repost no duplique.
+ *
+ * @param {{ dest?: string, brand?: string, links?: string[], title?: string, source?: string }} opts
+ * @returns {{ marked: number, brands: string[], links: string[] }}
+ */
+export function markFeedLinksSent({
+  dest = "fvdigital",
+  brand = "",
+  links = [],
+  title = "",
+  source = "bot",
+} = {}) {
+  const brands = brand
+    ? [brand === "f1rd" ? "f1rd" : "fvdigital"]
+    : dest === "both"
+      ? ["fvdigital", "f1rd"]
+      : dest === "f1rd"
+        ? ["f1rd"]
+        : ["fvdigital"];
+
+  const cleaned = [
+    ...new Set(
+      (Array.isArray(links) ? links : [links])
+        .map((u) => cleanLink(u))
+        .filter((u) => /^https?:\/\//i.test(u))
+    ),
+  ];
+  if (!cleaned.length) return { marked: 0, brands, links: [] };
+
+  const state = loadState();
+  let marked = 0;
+  for (const b of brands) {
+    for (const link of cleaned) {
+      if (isSent(state, b, { id: link, link, title })) continue;
+      markSent(
+        state,
+        b,
+        { id: link, link, title },
+        { source, via: "external-publish" }
+      );
+      marked += 1;
+    }
+  }
+  if (marked) saveState(state);
+  return { marked, brands, links: cleaned };
 }
 
 function resolveChatId() {
@@ -439,6 +497,7 @@ async function processFeedSource(source, state, { dryRun = false, count } = {}) 
         }
         markSent(state, source.brand, item, {
           cardUrl: result.cardUrl,
+          caption: result.caption || "",
           queued: Boolean(result.webhook?.queued),
           feedId: item.feedId || null,
         });

@@ -1,5 +1,7 @@
 /**
- * Publica encuestas desde carpeta encuestas/ (TXT + fotos) a WordPress FV + redes FV Digital.
+ * Publica encuestas desde carpeta encuestas/:
+ * - Personas: TXT + fotos en la raíz → tarjeta generateNewsCard + noticia WP
+ * - Temáticas: markdown + encuestas/fotos/ → tarjeta ALPHA + noticia WP
  * Cron: check 09:00 (foto) → publicar 10:00 (1 pendiente, nunca repetir).
  */
 import {
@@ -11,9 +13,16 @@ import {
 import { basename, extname, join } from "node:path";
 import { Input, Telegraf } from "telegraf";
 import { config } from "./config.mjs";
-import { publishToWebhook } from "./publish-webhook.mjs";
+import { publishToDestinations, destIncludesFv, destLabel } from "./publish-webhook.mjs";
+import { markFeedLinksSent } from "./feed-repost.mjs";
 import { isPublicR2Url, uploadToR2 } from "./r2.mjs";
 import { generateNewsCard } from "./social-card.mjs";
+import { generateEncuestaAlphaCard } from "./encuesta-alpha-card.mjs";
+import {
+  loadPendingEncuestasTema,
+  resetTemaState,
+  saveTemaState,
+} from "./encuestas-tema.mjs";
 import { createPost, uploadImageFromBuffer } from "./wordpress.mjs";
 
 const STATE_FILE = join(config.root, ".encuestas-sent.json");
@@ -370,6 +379,21 @@ export function resolveImageForItem(item, images) {
 }
 
 function buildHtml(item) {
+  if (item.kind === "tema") {
+    const opts = Array.isArray(item.options) ? item.options : [];
+    const list = opts.length
+      ? `<ul>${opts.map((o) => `<li>${escapeHtml(o)}</li>`).join("")}</ul>`
+      : "";
+    return [
+      item.seriesTitle ? `<p><strong>${escapeHtml(item.seriesTitle)}</strong></p>` : "",
+      item.section ? `<p><em>${escapeHtml(item.section)}</em></p>` : "",
+      `<h2>${escapeHtml(item.question || item.title)}</h2>`,
+      list,
+      `<p><em>Encuesta abierta en redes. No equivale a un sondeo representativo.</em></p>`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
   const parts = [
     item.seriesTitle ? `<p><strong>${escapeHtml(item.seriesTitle)}</strong></p>` : "",
     `<h2>${escapeHtml(item.name)}</h2>`,
@@ -378,6 +402,27 @@ function buildHtml(item) {
     item.scale ? `<p><strong>Escala:</strong> ${escapeHtml(item.scale)}</p>` : "",
   ].filter(Boolean);
   return parts.join("\n");
+}
+
+function captionForItem(item, hashtag) {
+  if (item.kind === "tema") {
+    const opts = (item.options || []).map((o) => `• ${o}`).join("\n");
+    return [item.question || item.title, opts, hashtag].filter(Boolean).join("\n\n").trim();
+  }
+  return `${item.title}\n\n${hashtag}`.trim();
+}
+
+async function renderEncuestaCard(item, photoBuffer) {
+  if (item.kind === "tema") {
+    return generateEncuestaAlphaCard({
+      photoBuffer,
+      title: item.question || item.title,
+    });
+  }
+  return generateNewsCard({
+    backgroundBuffer: photoBuffer,
+    title: item.title,
+  });
 }
 
 function escapeHtml(s = "") {
@@ -438,11 +483,36 @@ export function loadPendingEncuestas({ force = false, onlyId = "" } = {}) {
 }
 
 /**
- * Check 09:00: verifica foto de la primera pendiente; si falta, pide por Telegram.
+ * Check 09:00: verifica foto de la primera pendiente (tema o personas); si falta, pide por Telegram.
  */
 export async function runEncuestasCheck({ notify = true } = {}) {
-  const loaded = loadPendingEncuestas();
-  const next = loaded.items[0] || null;
+  let next = null;
+  let source = "personas";
+  let sourcePath = "";
+
+  try {
+    const tema = loadPendingEncuestasTema();
+    if (tema.items.length) {
+      next = tema.items[0];
+      source = "tema";
+      sourcePath = tema.mdPath;
+    }
+  } catch {
+    /* sin markdown temático */
+  }
+
+  let loadedPersonas = null;
+  if (!next) {
+    try {
+      loadedPersonas = loadPendingEncuestas();
+      next = loadedPersonas.items[0] || null;
+      sourcePath = loadedPersonas.txtPath;
+    } catch (error) {
+      const msg = `Encuestas check: ${error.message}`;
+      console.warn(msg);
+      return { ok: true, pending: false, next: null, hasPhoto: false, message: msg };
+    }
+  }
 
   if (!next) {
     const msg = "Encuestas check: no hay pendientes (todas enviadas).";
@@ -451,15 +521,18 @@ export async function runEncuestasCheck({ notify = true } = {}) {
   }
 
   const hasPhoto = Boolean(next.image);
-  const example = `${slugifyName(next.name)}.jpg`;
+  const example =
+    source === "tema"
+      ? "encuestas/fotos/<tema>.jpg"
+      : `${slugifyName(next.name)}.jpg`;
   let message;
   if (hasPhoto) {
-    message = `OK: lista para 10:00 — ${next.name} (foto: ${next.image.file})`;
+    message = `OK: lista para 10:00 — [${source}] ${next.title?.slice(0, 80) || next.name} (foto: ${next.image.file})`;
     console.log(message);
   } else {
     message =
-      `Falta foto para la encuesta de las 10:00: ${next.name}.\n` +
-      `Ponla en la carpeta encuestas/ (ej. ${example} o tokens del nombre).`;
+      `Falta foto para la encuesta de las 10:00 [${source}]: ${next.name || next.title}.\n` +
+      `Ponla en ${example}.`;
     console.warn(message);
   }
 
@@ -480,9 +553,73 @@ export async function runEncuestasCheck({ notify = true } = {}) {
     pending: true,
     next,
     hasPhoto,
+    source,
     imageFile: next.image?.file || null,
     message,
-    txtPath: loaded.txtPath,
+    txtPath: sourcePath,
+  };
+}
+
+/**
+ * Carga cola según modo.
+ * - tema (default cron): markdown + ALPHA; si se acabó, reinicia y vuelve a empezar
+ * - personas: TXT + fotos raíz
+ * - auto: tema si hay pendientes (o tras reinicio); si no, personas
+ */
+function loadEncuestasQueue({
+  mode = "tema",
+  force = false,
+  onlyId = "",
+} = {}) {
+  const want = String(mode || "tema").toLowerCase();
+  let recycled = false;
+
+  if (want === "personas") {
+    const loaded = loadPendingEncuestas({ force, onlyId });
+    return {
+      source: "personas",
+      sourcePath: loaded.txtPath,
+      items: loaded.items,
+      images: loaded.images,
+      state: loaded.state,
+      allCount: loaded.allCount,
+      seriesTitle: loaded.seriesTitle,
+      recycled: false,
+    };
+  }
+
+  let tema = loadPendingEncuestasTema({ force, onlyId });
+  if (!force && !onlyId && !tema.items.length && tema.allCount > 0) {
+    console.log("Cola temática agotada → reinicio (.encuestas-tema-sent.json)");
+    resetTemaState();
+    recycled = true;
+    tema = loadPendingEncuestasTema({ force: false, onlyId });
+  }
+
+  if (want === "tema" || tema.items.length) {
+    return {
+      source: "tema",
+      sourcePath: tema.mdPath,
+      items: tema.items,
+      images: tema.images,
+      state: tema.state,
+      allCount: tema.allCount,
+      seriesTitle: tema.seriesTitle,
+      recycled,
+    };
+  }
+
+  // auto sin tema → personas
+  const loaded = loadPendingEncuestas({ force, onlyId });
+  return {
+    source: "personas",
+    sourcePath: loaded.txtPath,
+    items: loaded.items,
+    images: loaded.images,
+    state: loaded.state,
+    allCount: loaded.allCount,
+    seriesTitle: loaded.seriesTitle,
+    recycled: false,
   };
 }
 
@@ -495,6 +632,7 @@ export async function runEncuestasCheck({ notify = true } = {}) {
  *   previewOnly?: boolean,
  *   onlyId?: string,
  *   skipTelegram?: boolean,
+ *   mode?: "tema"|"personas"|"auto",
  * }} opts
  */
 export async function runEncuestas({
@@ -505,13 +643,21 @@ export async function runEncuestas({
   previewOnly = false,
   onlyId = "",
   skipTelegram = false,
+  webhookDest = "fvdigital",
+  mode = "tema",
 } = {}) {
-  const loaded = loadPendingEncuestas({ force, onlyId });
-  const { txtPath, state } = loaded;
+  const loaded = loadEncuestasQueue({ mode, force, onlyId });
+  const { source, sourcePath, state, recycled } = loaded;
   let items = loaded.items;
+  const dest = webhookDest || "fvdigital";
+  const doWp = destIncludesFv(dest);
+  const isTema = source === "tema";
 
-  console.log(`TXT: ${basename(txtPath)} (${loaded.allCount} encuestas, ${items.length} en cola)`);
-  console.log(`Fotos en carpeta: ${loaded.images.length}`);
+  console.log(
+    `${isTema ? "MD" : "TXT"}: ${basename(sourcePath)} (${loaded.allCount} encuestas, ${items.length} en cola) [${source}]${recycled ? " (reiniciada)" : ""}`
+  );
+  console.log(`Fotos: ${loaded.images.length}`);
+  console.log(`Webhook destino: ${destLabel(dest)}`);
 
   const effectiveLimit =
     limit != null && Number(limit) > 0 ? Number(limit) : undefined;
@@ -524,21 +670,26 @@ export async function runEncuestas({
       await notifyTelegram([
         "Encuestas",
         "No hay encuestas nuevas por publicar (todas enviadas o sin bloques).",
-        txtPath,
+        sourcePath,
       ]).catch((e) => console.warn(e.message));
     }
-    return { published: [], skipped: [], noneNew: true, dryRun };
+    return { published: [], skipped: [], noneNew: true, dryRun, source, recycled };
   }
 
   const published = [];
   const skipped = [];
   const errors = [];
-  const hashtag = config.publishWebhook?.hashtag || "#fvdigital";
+  const hashtag =
+    dest === "f1rd"
+      ? config.f1rdWebhook?.hashtag || "#Formula1RD"
+      : config.publishWebhook?.hashtag || "#fvdigital";
 
   for (const item of items) {
     console.log(`→ ${item.title.slice(0, 100)}${item.title.length > 100 ? "…" : ""}`);
     if (!item.image) {
-      const msg = `Sin foto para: ${item.name} (ej. ${slugifyName(item.name)}.jpg)`;
+      const msg = isTema
+        ? `Sin foto temática para: ${item.title?.slice(0, 80)} (encuestas/fotos/)`
+        : `Sin foto para: ${item.name} (ej. ${slugifyName(item.name)}.jpg)`;
       console.warn(msg);
       skipped.push({ item, reason: "sin-foto" });
       if (!skipTelegram) {
@@ -553,10 +704,11 @@ export async function runEncuestas({
           dryRun: true,
           item,
           imageFile: item.image.file,
+          source,
         });
         if (!skipTelegram) {
           await notifyTelegram([
-            "Encuesta (dry-run)",
+            `Encuesta (dry-run) [${source}]`,
             item.title,
             item.image.file,
             item.question?.slice(0, 200) || "",
@@ -567,36 +719,43 @@ export async function runEncuestas({
 
       const buffer = readFileSync(item.image.path);
       const mime = mimeForPath(item.image.path);
+      const cardTitle = item.question || item.title;
+      const caption = captionForItem(item, hashtag);
+      const id = surveyId(item);
 
       // Preview: solo tarjeta a Telegram (sin WP, R2 ni webhook).
       if (previewOnly) {
-        const cardTitle = item.title;
-        const caption = `${item.title}\n\n${hashtag}`.trim();
-        const card = await generateNewsCard({
-          backgroundBuffer: buffer,
-          title: cardTitle,
-        });
+        const card = await renderEncuestaCard(item, buffer);
         await notifyTelegram(
-          ["Encuesta (preview Telegram — sin webhook)", item.title, item.image.file],
+          [
+            `Encuesta (preview Telegram — sin webhook) [${source}]`,
+            item.title,
+            item.image.file,
+          ],
           { photoBuffer: card, photoCaption: caption.slice(0, 1024) }
         );
-        published.push({ previewOnly: true, item, cardTitle });
+        published.push({ previewOnly: true, item, cardTitle, source });
         continue;
       }
 
-      const prev = state.sent[surveyId(item)];
+      const prev = state.sent[id];
       let postId = prev?.postId || null;
       let postLink = null;
 
-      // Orden estricto: WordPress primero (salvo reenvío solo redes).
-      if (!socialOnly) {
+      // Cada encuesta genera noticia en WordPress (si el destino incluye FV).
+      if (doWp && (!socialOnly || !postId)) {
+        if (socialOnly && !postId) {
+          console.warn(
+            `socialOnly sin post previo para ${item.name || item.title}; se crea el artículo WP primero.`
+          );
+        }
         const media = await uploadImageFromBuffer(buffer, item.image.file, mime, {
-          title: item.title,
-          altText: item.name,
+          title: cardTitle,
+          altText: item.name || cardTitle,
         });
         const html = buildHtml(item);
         const result = await createPost({
-          title: item.title,
+          title: cardTitle,
           text: item.bodyText,
           htmlContent: html,
           featuredMediaId: media.id,
@@ -607,101 +766,104 @@ export async function runEncuestas({
         if (!postId) {
           throw new Error("WordPress no devolvió post id");
         }
-      } else if (!postId) {
-        console.warn(
-          `socialOnly sin post previo para ${item.name}; se crea el artículo WP primero.`
-        );
-        const media = await uploadImageFromBuffer(buffer, item.image.file, mime, {
-          title: item.title,
-          altText: item.name,
-        });
-        const html = buildHtml(item);
-        const result = await createPost({
-          title: item.title,
-          text: item.bodyText,
-          htmlContent: html,
-          featuredMediaId: media.id,
-          status: config.autoPublishUrls ? "publish" : config.defaultPostStatus,
-        });
-        postId = result.post?.id || null;
-        postLink = result.post?.link || null;
-        if (!postId) {
-          throw new Error("WordPress no devolvió post id");
-        }
+      } else if (!doWp) {
+        console.log(`Sin WordPress (${destLabel(dest)}) para ${item.name || item.title}`);
       }
-
-      // Redes: titular íntegro de la encuesta (pregunta), sin reescribir/acortar con IA.
-      const cardTitle = item.title;
-      const caption = `${item.title}\n\n${hashtag}`.trim();
 
       if (!config.r2?.enabled) {
         throw new Error("R2 no está configurado; no se puede enviar tarjeta a redes.");
       }
 
-      const card = await generateNewsCard({
-        backgroundBuffer: buffer,
-        title: cardTitle,
-      });
+      const card = await renderEncuestaCard(item, buffer);
+      const slugBit = slugifyName(item.name || item.title || "encuesta").slice(0, 40);
       const cardUrl = await uploadToR2(
         card,
-        `cards/encuesta-${Date.now()}-${slugifyName(item.name).slice(0, 40)}.png`,
+        `cards/encuesta-${isTema ? "tema-" : ""}${Date.now()}-${slugBit}.png`,
         "image/png"
       );
       if (!isPublicR2Url(cardUrl)) {
         throw new Error("URL R2 de tarjeta no es pública (r2.dev).");
       }
 
-      const webhook = await publishToWebhook({
+      const results = await publishToDestinations(dest, {
         title: cardTitle,
         caption,
         imageUrl: cardUrl,
         mediaType: "IMAGE",
-        target: "fvdigital",
       });
-      if (!webhook?.ok) {
-        throw new Error(webhook?.error || `Webhook HTTP ${webhook?.status}`);
+      const ok = results.filter((r) => r.ok);
+      const failed = results.filter((r) => !r.ok);
+      if (!ok.length) {
+        throw new Error(failed[0]?.error || `Webhook HTTP ${failed[0]?.status}`);
       }
+      if (postLink) {
+        try {
+          const marked = markFeedLinksSent({
+            dest,
+            links: [postLink],
+            title: cardTitle,
+            source: isTema ? "encuestas-tema" : "encuestas",
+          });
+          if (marked.marked) {
+            console.log(
+              `feed-repost: encuesta marcada (${marked.links[0]}) para no duplicar`
+            );
+          }
+        } catch (error) {
+          console.warn("markFeedLinksSent encuesta:", error.message);
+        }
+      }
+      const webhook = {
+        ok: true,
+        queued: ok.some((r) => r.queued),
+        results,
+      };
 
-      state.sent[surveyId(item)] = {
-        title: item.title,
+      state.sent[id] = {
+        title: cardTitle,
         name: item.name,
+        kind: item.kind || source,
         image: item.image.file,
         postId,
         cardUrl,
         at: new Date().toISOString(),
         queued: Boolean(webhook.queued),
         socialOnly: Boolean(socialOnly && prev?.postId),
+        dest,
       };
-      saveState(state);
+      if (isTema) saveTemaState(state);
+      else saveState(state);
 
       published.push({
         item,
         postId,
+        postLink,
         cardUrl,
         webhook,
         cardBuffer: card,
         caption,
         cardTitle,
+        source,
       });
 
       if (!skipTelegram) {
         await notifyTelegram(
           [
-            "Encuesta → WP + redes FV",
-            item.title,
-            postLink || `post ${postId}`,
+            `Encuesta → ${destLabel(dest)} [${source}]`,
+            cardTitle,
+            postLink || (postId ? `post ${postId}` : "sin WP"),
             cardUrl,
-            webhook.queued ? "Webhook FV: encolado" : "Webhook FV: ok",
+            webhook.queued ? "Webhook: encolado" : "Webhook: ok",
             caption,
           ],
           {
             photoBuffer: card,
-            photoCaption: item.title,
+            photoCaption: cardTitle,
           }
         );
       }
     } catch (error) {
-      console.error(`Error ${item.name}:`, error.message);
+      console.error(`Error ${item.name || item.title}:`, error.message);
       errors.push({ item, error: error.message });
       if (!skipTelegram) {
         await notifyTelegram(["Encuesta (error)", item.title, error.message]).catch(
@@ -711,7 +873,16 @@ export async function runEncuestas({
     }
   }
 
-  return { published, skipped, errors, dryRun, noneNew: false, txtPath };
+  return {
+    published,
+    skipped,
+    errors,
+    dryRun,
+    noneNew: false,
+    txtPath: sourcePath,
+    source,
+    recycled,
+  };
 }
 
 /** Límite por defecto del cron diario (1). */

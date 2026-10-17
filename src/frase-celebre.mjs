@@ -6,6 +6,7 @@ import { config } from "./config.mjs";
 import { calendarYmd, NEWS_TZ } from "./news-date.mjs";
 import { publishToWebhook } from "./publish-webhook.mjs";
 import { isPublicR2Url, uploadToR2 } from "./r2.mjs";
+import { archiveProcessedVideoSafe } from "./video-archive.mjs";
 
 const LAST_CHAT_FILE = join(config.root, ".last-chat.json");
 const QUOTES_PATH = join(config.root, "src", "frase-celebre-quotes.json");
@@ -52,10 +53,11 @@ function escapeHtml(text) {
 
 function quoteFontSize(text) {
   const n = String(text).length;
-  if (n > 120) return 32;
+  if (n > 140) return 28;
+  if (n > 110) return 32;
   if (n > 90) return 36;
-  if (n > 70) return 42;
-  if (n > 50) return 48;
+  if (n > 70) return 40;
+  if (n > 50) return 46;
   return 52;
 }
 
@@ -128,13 +130,18 @@ export function writeFraseHtml({ quote, author, dir } = {}) {
         text-align: center;
       }
       #quote {
+        width: 100%;
         max-width: 1040px;
+        min-width: 0;
         font-family: Georgia, "Times New Roman", serif;
         font-size: ${fontSize}px;
         font-weight: 400;
         line-height: 1.28;
         color: #fff;
         text-shadow: 0 2px 18px rgba(8, 36, 90, 0.45);
+        overflow-wrap: break-word;
+        word-wrap: break-word;
+        hyphens: auto;
       }
       #quote .ch { display: inline; }
       #author {
@@ -187,7 +194,8 @@ export function writeFraseHtml({ quote, author, dir } = {}) {
       for (const ch of text) {
         const span = document.createElement("span");
         span.className = "ch";
-        span.textContent = ch === " " ? "\\u00A0" : ch;
+        // Espacio normal (no NBSP) para que el titular pueda hacer wrap.
+        span.textContent = ch;
         quoteEl.appendChild(span);
       }
       const chars = quoteEl.querySelectorAll(".ch");
@@ -359,6 +367,16 @@ export async function runFraseCelebre({
   };
 
   if (!shouldPublish) {
+    try {
+      const buf = readFileSync(outputPath);
+      await archiveProcessedVideoSafe({
+        buffer: buf,
+        caption,
+        nameHint: `frase-${picked.ymd.replace(/-/g, "")}`,
+      });
+    } catch (err) {
+      console.warn("frase archive:", err.message);
+    }
     await notifyTelegram([
       "Frase celebre (prueba, sin webhook)",
       caption,
@@ -376,6 +394,12 @@ export async function runFraseCelebre({
   result.videoUrl = videoUrl;
   result.r2Key = r2Key;
   console.log(`R2: ${videoUrl}`);
+  await archiveProcessedVideoSafe({
+    buffer,
+    caption,
+    url: videoUrl,
+    nameHint: `frase-${picked.ymd.replace(/-/g, "")}`,
+  });
 
   const webhook = await publishToWebhook({
     title: caption,

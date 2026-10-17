@@ -58,6 +58,10 @@ const CLIENTS = {
       "rdvial",
       "rd vial",
       "seguridad vial",
+      "motoristas",
+      "motorista",
+      "juan manuel mendez",
+      "juan manuel méndez",
     ],
   },
 };
@@ -179,6 +183,15 @@ function field(block, name) {
   const re = new RegExp(`-\\s*\\*\\*${name}:\\*\\*\\s*(.+)`, "i");
   const m = block.match(re);
   return m?.[1]?.trim() || "";
+}
+
+/** Campos del MD v6.8 (`Fuente / medio`, `Enlace Cloudflare R2`, …). */
+function fieldAny(block, names = []) {
+  for (const name of names) {
+    const v = field(block, name);
+    if (v) return v;
+  }
+  return "";
 }
 
 const WEEKDAYS =
@@ -370,7 +383,7 @@ function sectionBody(block) {
     block.match(/Motivo:\s*([\s\S]*?)(?=\nContexto:|\nPuntos clave:|\nRelevancia:|\n##\s|$)/i) ||
     block.match(/-\s*\*\*Motivo:\*\*\s*(.+)/i);
   const transcripcion = block.match(
-    /##\s*📝?\s*Transcripci[oó]n\s+Completa\s*\n+([\s\S]*?)(?=\n---|\n#\s|\n###\s|$)/i
+    /##\s*📝?\s*Transcripci[oó]n(?:\s+Completa)?\s*\n+([\s\S]*?)(?=\n---|\n#\s|\n###\s|$)/i
   );
 
   if (tema) parts.tema = tema[1].trim();
@@ -468,28 +481,63 @@ export function classifySentiment(item) {
 }
 
 function parseSections(markdown) {
-  const chunks = markdown.split(/\n(?=# 📊 ANÁLISIS COMPLETO:)/);
+  // Formato v6.8: "# 🎞️ Coincidencia (Video): …" / "# 🎧 Coincidencia (Audio): …"
+  // Legacy: "# 🎞️ ANÁLISIS COMPLETO (Video): …" / "# 📊 ANÁLISIS COMPLETO: …"
+  const chunks = String(markdown || "").split(
+    /\n(?=#\s*[^\n]*(?:AN[AÁ]LISIS\s+COMPLETO|Coincidencia\s*\(\s*(?:Video|Audio)\s*\)))/i
+  );
   const items = [];
 
   for (const chunk of chunks) {
     if (!/Término detectado:/i.test(chunk)) continue;
-    const termMatch = chunk.match(/\*\*Término detectado:\*\*\s*\*\*([^*]+)\*\*/i);
+    const termMatch = chunk.match(
+      /\*\*Término detectado:\*\*\s*\*\*([^*]+)\*\*/i
+    );
     const term = (termMatch?.[1] || "").trim().toLowerCase();
     if (!term) continue;
 
     const body = sectionBody(chunk);
-    const r2 = stripMdLink(field(chunk, "Video Cloudflare R2"));
-    const cloudinary = stripMdLink(field(chunk, "Video Cloudinary"));
-    const video = r2 || cloudinary;
-    const medioClean = cleanMedio(field(chunk, "Medio"));
+    const archivo = fieldAny(chunk, ["Archivo"]) || "";
+    const isAudio =
+      /(?:AN[AÁ]LISIS\s+COMPLETO|Coincidencia)\s*\(\s*Audio\s*\)/i.test(chunk) ||
+      /\*\*Tipo de medio:\*\*\s*\*\*Audio\*\*/i.test(chunk) ||
+      /\.wav\b/i.test(archivo);
+
+    const video =
+      stripMdLink(fieldAny(chunk, [
+        "Video Cloudflare R2",
+        "Video Cloudinary",
+        "Video Bunny CDN",
+        "Enlace Cloudflare R2",
+      ]));
+    const audio =
+      stripMdLink(fieldAny(chunk, [
+        "Audio Cloudflare R2",
+        "Audio Cloudinary",
+        "Audio Bunny CDN",
+        "Enlace Cloudflare R2",
+      ]));
+    const media = isAudio ? audio || video : video || audio;
+
+    const medioClean = cleanMedio(
+      fieldAny(chunk, ["Medio", "Fuente / medio", "Fuente"])
+    );
     const transcriptExcerpt = excerptTranscription(body.transcripcion, term);
+    const mediaUrl = media?.url || "";
+    const mediaKind = isAudio
+      ? /\.wav\b/i.test(`${archivo} ${mediaUrl}`)
+        ? "wav"
+        : /\.mp3\b/i.test(mediaUrl)
+          ? "mp3"
+          : "audio"
+      : "mp4";
 
     const base = {
       term,
       medio: medioClean.display,
       medioNombre: medioClean.nombre,
       medioFecha: medioClean.fecha,
-      analyzedAt: field(chunk, "Fecha de análisis"),
+      analyzedAt: fieldAny(chunk, ["Fecha de análisis"]),
       tema: body.tema,
       contexto: body.contexto,
       puntos: body.puntos,
@@ -497,9 +545,13 @@ function parseSections(markdown) {
       transcripcion: body.transcripcion,
       transcripcionExcerpt: transcriptExcerpt,
       relevancia: body.relevancia,
-      videoUrl: video?.url || "",
-      videoLabel: video?.label || "",
-      channel: "tv",
+      videoUrl: mediaUrl,
+      videoLabel: media?.label || (isAudio ? "Audio" : "Video"),
+      txtUrl: "",
+      archivo: archivo.replace(/^[`']|[`']$/g, ""),
+      mediaType: isAudio ? "audio" : "video",
+      mediaKind,
+      channel: isAudio ? "radio" : "tv",
     };
     base.tono = classifySentiment(base);
     items.push(base);

@@ -1,5 +1,20 @@
 import { config } from "./config.mjs";
 
+/** Solo este nombre: periodista, no protagonista. No borrar fuentes ni el resto del dato. */
+export const NEVER_NAME_MILTON_JEREZ_RULE = `NUNCA menciones a Milton Jerez (es periodista; no es parte de la noticia).
+- Conserva fuentes, medios, instituciones, cifras y hechos.
+- NO lo confundas con Milton Morrison (Intrant), que sí puede ir en la nota.
+- Si el material dice “según Milton Jerez”, usa el dato y omite su nombre.`;
+
+export function scrubMiltonJerez(text = "") {
+  let t = String(text || "");
+  if (!t || !/\bmilton\s+jerez\b/i.test(t)) return t;
+  t = t.replace(/\bsegún\s+(el\s+periodista\s+)?milton\s+jerez,?\s*/gi, "");
+  t = t.replace(/\b(el\s+periodista\s+)?milton\s+jerez\b/gi, "");
+  t = t.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+([,.;:])/g, "$1");
+  return t.trim();
+}
+
 export function extractOriginalTitle(ocrText, fallback = "Noticia") {
   const lines = ocrText
     .split(/\n/)
@@ -77,7 +92,7 @@ export function decodeHtmlEntities(text = "") {
 
 export function cleanImportedText(text = "") {
   const skipLine =
-    /^(por\s+|n\s*digital|list[ií]n|diario libre|acento|el nacional|te puede interesar|share:|compartir|síguenos|publicidad|relacionad|archivo|agencia efe|efe\b|ciudad de)/i;
+    /^(por\s+|n\s*digital|list[ií]n|diario libre|acento|el nacional|te puede interesar|share:|compartir|síguenos|publicidad|relacionad|archivo|agencia efe|efe\b|ciudad de|agenda\s*56)/i;
 
   return decodeHtmlEntities(text)
     .split(/\n\n+/)
@@ -98,6 +113,51 @@ export function cleanImportedText(text = "") {
       return true;
     })
     .join("\n\n");
+}
+
+/** Quita nombre de medio + bajada tipo “AGENDA56, SANTO DOMINGO ESTE.- …” */
+export function stripMediaDateline(text = "") {
+  let t = decodeHtmlEntities(String(text || ""))
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t) return "";
+
+  t = t.replace(
+    /^(AGENDA\s*56|LIST[IÍ]N(?:\s+DIARIO)?|DIARIO\s+LIBRE|EL\s+NACIONAL|N\s*DIGITAL|CDN(?:37)?|ACENTO|EL\s+CARIBE|HOY|REMOLACHA|AL\s+MOMENTO|PROCESO|RC\s*NOTICIAS|SINMIEDE|EL\s+D[IÍ]A|METRO|SIN\s*CORTAPISA)[,\s.\-–—:]*/i,
+    ""
+  );
+  // “MEDIO, CIUDAD.- resto” o “CIUDAD.- resto”
+  t = t.replace(
+    /^[A-ZÁÉÍÓÚÑ0-9][A-ZÁÉÍÓÚÑ0-9.& ]{0,36},\s*[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{2,40}\.?\s*[-–—]\s*/u,
+    ""
+  );
+  t = t.replace(
+    /^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{2,40}\.?\s*[-–—]\s*/u,
+    ""
+  );
+  t = t.replace(/^\s*[-–—:,]\s*/, "").replace(/\s+/g, " ").trim();
+  return t;
+}
+
+/** ¿Parece lead crudo de medio y no un titular FV? */
+export function looksLikeRawNewsLead(text = "") {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return true;
+  if (
+    /AGENDA\s*56|LIST[IÍ]N|DIARIO\s+LIBRE|EL\s+NACIONAL|N\s*DIGITAL|CDN37|ACENTO/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/,\s*(SANTO DOMINGO|SANTIAGO|DISTRITO NACIONAL|LA VEGA)\b/i.test(t)) {
+    return true;
+  }
+  if (/\b(SANTO DOMINGO|SANTIAGO)\b.{0,20}\.\s*[-–—]/i.test(t)) return true;
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length > 14) return true;
+  return false;
 }
 
 export function textToNewsHtml(text = "") {
@@ -121,10 +181,82 @@ export function buildAuthorSignature(author = config.news.authorSignature) {
   return `<p><strong>${escapeHtml(author)}</strong></p>`;
 }
 
-export function finalizeNewsHtml(bodyHtml, { sourceName, sourceUrl, imageUrl, skipSource } = {}) {
-  const parts = [(bodyHtml || "").trim()];
+/** ID de YouTube para iframe (watch, youtu.be, shorts, embed, live). */
+export function youtubeVideoId(url = "") {
+  try {
+    const u = new URL(String(url).trim());
+    const host = u.hostname.replace(/^www\./i, "");
+    if (/^youtu\.be$/i.test(host)) {
+      return u.pathname.split("/").filter(Boolean)[0] || "";
+    }
+    if (!/youtube\.com|youtube-nocookie\.com/i.test(host)) return "";
+    if (u.searchParams.get("v")) return u.searchParams.get("v");
+    const m = u.pathname.match(/\/(?:embed|shorts|live|v)\/([^/?#]+)/i);
+    return m ? m[1] : "";
+  } catch {
+    return "";
+  }
+}
 
-  if (imageUrl && !parts[0].includes(imageUrl)) {
+const PLAYER_SHELL =
+  "margin:28px 0;padding:0;border-radius:18px;overflow:hidden;background:#0B1F3A;border:1px solid #1e3a5f;box-shadow:0 14px 36px rgba(11,31,58,.28);";
+const PLAYER_STAGE =
+  "position:relative;width:100%;aspect-ratio:16/9;background:#07111f;";
+const PLAYER_MEDIA =
+  "position:absolute;inset:0;width:100%;height:100%;border:0;object-fit:contain;background:#000;";
+
+/** Player elegante 16:9 (HTML5 / YouTube) para el cuerpo WP. */
+export function videoPlayerHtml(url = "") {
+  const src = String(url || "").trim();
+  if (!/^https?:\/\//i.test(src)) return "";
+  const safe = escapeHtml(src);
+  const yt = youtubeVideoId(src);
+  const media =
+    yt && /^[\w-]{6,20}$/.test(yt)
+      ? `<iframe src="https://www.youtube.com/embed/${escapeHtml(yt)}" title="Video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen style="${PLAYER_MEDIA}"></iframe>`
+      : `<video controls playsinline preload="metadata" src="${safe}" style="${PLAYER_MEDIA}"></video>`;
+  return `<figure class="wp-block-video fv-video-player" style="${PLAYER_SHELL}">
+<div class="fv-video-stage" style="${PLAYER_STAGE}">${media}</div>
+</figure>`;
+}
+
+/** Inserta HTML después del n-ésimo párrafo de contenido (ignora fuente/firma). */
+export function insertAfterNthParagraph(html, insert, n = 2) {
+  const body = String(html || "");
+  const chunk = String(insert || "").trim();
+  if (!chunk) return body;
+  const re = /<p\b[^>]*>[\s\S]*?<\/p>/gi;
+  let count = 0;
+  let lastIndex = 0;
+  let match;
+  while ((match = re.exec(body))) {
+    const inner = match[0].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (!inner) continue;
+    if (/^fuente:/i.test(inner)) continue;
+    if (/<strong>/i.test(match[0]) && inner.length < 80) continue;
+    count += 1;
+    lastIndex = match.index + match[0].length;
+    if (count === n) break;
+  }
+  if (count === 0) return `${chunk}\n${body}`;
+  return `${body.slice(0, lastIndex)}\n${chunk}\n${body.slice(lastIndex)}`;
+}
+
+export function withNewsVideoPlayer(html, videoUrl) {
+  const url = String(videoUrl || "").trim();
+  const body = String(html || "");
+  if (!url || /fv-video-player/.test(body) || body.includes(url)) return body;
+  const player = videoPlayerHtml(url);
+  if (!player) return body;
+  return insertAfterNthParagraph(body, player, 2);
+}
+
+export function finalizeNewsHtml(bodyHtml, { sourceName, sourceUrl, imageUrl, skipSource, videoUrl } = {}) {
+  let body = (bodyHtml || "").trim();
+  if (videoUrl) body = withNewsVideoPlayer(body, videoUrl);
+  const parts = [body];
+
+  if (imageUrl && !parts.join("").includes(imageUrl)) {
     parts.push(`<p><img src="${imageUrl}" alt="" /></p>`);
   }
 

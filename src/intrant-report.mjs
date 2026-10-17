@@ -13,6 +13,8 @@ import {
   prioritizeMendezItems,
 } from "./intrant-report-brief.mjs";
 import { config } from "./config.mjs";
+import { iconAttachments, networkIconHtml } from "./social-report.mjs";
+import { renderReputBanner } from "./reput-banner.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -44,8 +46,45 @@ export function formatReporteTelegram(result) {
   return lines.join("\n");
 }
 
-function buildReporteEmail({ displayDate, markdown, attachmentFilename, stats = null }) {
-  const bodyHtml = markdownToEmailHtml(markdown);
+function sourceStatusStrip(bySource = {}) {
+  const rows = [
+    ["gmail", "Prensa", bySource.gmail, "menciones", false],
+    ["x", "X", bySource.x, "menciones", true],
+    ["instagram", "Instagram", bySource.instagram, "menciones", true],
+    ["youtube", "YouTube", bySource.youtube, "videos", true],
+    ["facebook", "Facebook", bySource.facebook, "menciones", true],
+  ];
+  const cards = rows
+    .map(([net, label, arr, unit, hasIcon]) => {
+      const n = (arr || []).length;
+      const estado = n ? `${n} ${n === 1 ? unit.replace(/s$/, "") : unit}` : "Sin menciones";
+      const icon = hasIcon ? `${networkIconHtml(net, 22)}&nbsp;` : "";
+      return `<td style="width:20%;padding:6px;vertical-align:top;">
+        <div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:10px 8px;text-align:center;min-height:86px;">
+          <div style="margin-bottom:6px;">${icon}<span style="font-size:13px;font-weight:800;color:#0B1F3A;">${label}</span></div>
+          <div style="font-size:20px;font-weight:800;color:${n ? "#0f172a" : "#94a3b8"};">${n}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;">${estado}</div>
+        </div>
+      </td>`;
+    })
+    .join("");
+  return `<div style="margin:16px 0 8px;">
+    <div style="font-size:12px;font-weight:800;color:#0B1F3A;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;">Estado por fuente</div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>${cards}</tr></table>
+  </div>`;
+}
+
+function buildReporteEmail({
+  displayDate,
+  markdown,
+  attachmentFilename,
+  stats = null,
+  bySource = null,
+  topTerms = null,
+  reputBannerCid = "",
+}) {
+  const socialStrip = bySource ? sourceStatusStrip(bySource) : "";
+  const bodyHtml = socialStrip + markdownToEmailHtml(markdown);
   return {
     subject: `REPORTE EJECUTIVO INTRANT — Monitoreo, reputación y conversación digital — ${displayDate}`,
     html: wrapExecutiveEmailHtml({
@@ -53,6 +92,9 @@ function buildReporteEmail({ displayDate, markdown, attachmentFilename, stats = 
       bodyHtml,
       attachmentFilename,
       stats,
+      bySource,
+      topTerms,
+      reputBannerCid,
     }),
     text: markdown,
   };
@@ -64,6 +106,7 @@ export async function runIntrantReport({
   noEmail = false,
   refreshInstagram = false,
   refreshFacebook = false,
+  toOverride = "",
   onStatus,
 } = {}) {
   const displayDate = formatDisplayDate(date);
@@ -99,6 +142,16 @@ export async function runIntrantReport({
   }
 
   onStatus?.("Generando Word ejecutivo…");
+  const stats = buildExecutiveStats(items);
+  const bannerBuf = await renderReputBanner({
+    stats,
+    displayDate,
+    counts: collected.counts,
+  }).catch((err) => {
+    console.warn("reput banner:", err.message);
+    return null;
+  });
+
   const docx = await writeReporteDocx({
     items,
     displayDate,
@@ -111,11 +164,15 @@ export async function runIntrantReport({
     displayDate,
     markdown: brief.markdown,
     attachmentFilename: docx.filename,
-    stats: docx.stats || buildExecutiveStats(items),
+    stats: docx.stats || stats,
+    bySource,
+    topTerms: brief.topTerms || null,
+    reputBannerCid: bannerBuf ? "reput-banner" : "",
   });
 
-  const to = config.informes.emailIntrant;
-  const cc = mergeFixedCc(config.informes.emailIntrantCc);
+  // --to= (prueba): solo ese destinatario, sin CC
+  const to = toOverride || config.informes.emailIntrant;
+  const cc = toOverride ? "" : mergeFixedCc(config.informes.emailIntrantCc);
   let sent = null;
 
   if (!dryRun && !noEmail) {
@@ -128,6 +185,23 @@ export async function runIntrantReport({
       html: emailBody.html,
       text: emailBody.text,
       attachments: [
+        ...iconAttachments(["x", "instagram", "youtube", "facebook"]),
+        ...(bannerBuf
+          ? [
+              {
+                filename: "banner-reputacional-mendez.png",
+                content: bannerBuf,
+                contentType: "image/png",
+              },
+              {
+                filename: "reput-banner.png",
+                content: bannerBuf,
+                cid: "reput-banner",
+                contentDisposition: "inline",
+                contentType: "image/png",
+              },
+            ]
+          : []),
         {
           filename: docx.filename,
           content: readFileSync(docx.path),
